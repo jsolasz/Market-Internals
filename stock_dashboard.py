@@ -528,11 +528,13 @@ def run_dashboard():
                 spy_intraday_full['VWAP'] = tp_volume.cumsum() / spy_intraday_full['Volume'].cumsum()
                 spy_10d_sma_val = spy_daily['Close'].rolling(window=10).mean().iloc[-1]
                 spy_20d_sma_val = spy_daily['Close'].rolling(window=20).mean().iloc[-1]
+                spy_50d_sma_val = spy_daily['Close'].rolling(window=50).mean().iloc[-1]
                 fig_vwap = go.Figure()
                 fig_vwap.add_trace(go.Scatter(x=spy_intraday_full.index.time, y=spy_intraday_full['Close'], mode='lines', name='SPY Price', line=dict(color='#636EFA')))
                 fig_vwap.add_trace(go.Scatter(x=spy_intraday_full.index.time, y=spy_intraday_full['VWAP'], mode='lines', name='Intraday VWAP', line=dict(color='#FFA15A', dash='dash')))
                 fig_vwap.add_hline(y=spy_10d_sma_val, line_width=1, line_dash="dash", line_color="cyan", annotation_text=f"10-d SMA: {spy_10d_sma_val:.2f}")
                 fig_vwap.add_hline(y=spy_20d_sma_val, line_width=1, line_dash="dash", line_color="magenta", annotation_text=f"20-d SMA: {spy_20d_sma_val:.2f}")
+                fig_vwap.add_hline(y=spy_50d_sma_val, line_width=1, line_dash="dash", line_color="red", annotation_text=f"50-d SMA: {spy_50d_sma_val:.2f}")
                 fig_vwap.update_layout(title='SPY Intraday Analysis', yaxis_title='Price', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99))
                 st.plotly_chart(fig_vwap, use_container_width=True)
             with sub_col2:
