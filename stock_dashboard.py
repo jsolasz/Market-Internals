@@ -262,37 +262,53 @@ def build_distribution(vals, wts, grid, bw=0.60):
 
 def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
     map_tickers = list(ticker_map.values())
-    
     daily_closes = daily_data.xs('Close', level=1, axis=1)
+
+    # --- Daily Relative Performance (Normalized Ratio Method) ---
     last_close_etfs_all = daily_closes.iloc[-2]
     current_price_etfs_all = intraday_data.xs('Close', level=1, axis=1).iloc[-1]
     
-    valid_tickers = last_close_etfs_all.index.intersection(current_price_etfs_all.index)
-    pct_change_etfs_all = ((current_price_etfs_all[valid_tickers] - last_close_etfs_all[valid_tickers]) / last_close_etfs_all[valid_tickers] * 100).dropna()
-    
-    spy_perf_daily = pct_change_etfs_all.get('SPY', 0)
-    map_perf_daily = pct_change_etfs_all[pct_change_etfs_all.index.intersection(map_tickers)]
-    relative_perf_daily = (map_perf_daily - spy_perf_daily).dropna()
+    relative_perf_daily = pd.Series(dtype='float64')
+    if 'SPY' in last_close_etfs_all and 'SPY' in current_price_etfs_all and last_close_etfs_all.get('SPY', 0) != 0 and current_price_etfs_all.get('SPY', 0) != 0:
+        valid_map_tickers = [t for t in map_tickers if t in last_close_etfs_all and t in current_price_etfs_all]
+        
+        start_ratio = last_close_etfs_all[valid_map_tickers] / last_close_etfs_all['SPY']
+        end_ratio = current_price_etfs_all[valid_map_tickers] / current_price_etfs_all['SPY']
+        
+        relative_perf_daily = (end_ratio - start_ratio) * 100
+        
     relative_perf_daily_df = pd.DataFrame({'Name': [k for k, v in ticker_map.items() if v in relative_perf_daily.index], 'Relative Performance': relative_perf_daily.values}).sort_values('Relative Performance', ascending=False)
     
-    perf_1m_all = daily_closes.pct_change(periods=21).iloc[-1] * 100
-    spy_perf_1m = perf_1m_all.get('SPY', 0)
-    map_perf_1m = perf_1m_all[perf_1m_all.index.intersection(map_tickers)]
-    relative_perf_1m = (map_perf_1m - spy_perf_1m).dropna()
+    # --- 1-Month Relative Performance (Normalized Ratio Method) ---
+    relative_perf_1m = pd.Series(dtype='float64')
+    if len(daily_closes) > 21:
+        data_1m = daily_closes.iloc[-22:] # 22 days for 21 periods
+        if 'SPY' in data_1m.columns:
+            valid_map_tickers_1m = [t for t in map_tickers if t in data_1m.columns]
+            rel_1m = data_1m[valid_map_tickers_1m].div(data_1m['SPY'], axis=0).dropna()
+            if not rel_1m.empty:
+                rel_norm_1m = rel_1m - rel_1m.iloc[0]
+                relative_perf_1m = rel_norm_1m.iloc[-1] * 100
+
     relative_perf_1m_df = pd.DataFrame({'Name': [k for k, v in ticker_map.items() if v in relative_perf_1m.index], 'Relative Performance': relative_perf_1m.values}).sort_values('Relative Performance', ascending=False)
 
+    # --- YTD Relative Performance (Normalized Ratio Method) ---
+    relative_perf_ytd = pd.Series(dtype='float64')
     ytd_start_date = daily_closes.index[daily_closes.index.year == datetime.now().year].min()
-    ytd_start_prices = daily_closes.loc[ytd_start_date]
-    perf_ytd_all = ((daily_closes.iloc[-1] - ytd_start_prices) / ytd_start_prices) * 100
-    spy_perf_ytd = perf_ytd_all.get('SPY', 0)
-    map_perf_ytd = perf_ytd_all[perf_ytd_all.index.intersection(map_tickers)]
-    relative_perf_ytd = (map_perf_ytd - spy_perf_ytd).dropna()
+    data_ytd = daily_closes.loc[ytd_start_date:]
+    if 'SPY' in data_ytd.columns and not data_ytd.empty:
+        valid_map_tickers_ytd = [t for t in map_tickers if t in data_ytd.columns]
+        rel_ytd = data_ytd[valid_map_tickers_ytd].div(data_ytd['SPY'], axis=0).dropna()
+        if not rel_ytd.empty:
+            rel_norm_ytd = rel_ytd - rel_ytd.iloc[0]
+            relative_perf_ytd = rel_norm_ytd.iloc[-1] * 100
+        
     relative_perf_ytd_df = pd.DataFrame({'Name': [k for k, v in ticker_map.items() if v in relative_perf_ytd.index], 'Relative Performance': relative_perf_ytd.values}).sort_values('Relative Performance', ascending=False)
     
     def create_bar_fig(df, title):
         colors = ['#10b981' if x >= 0 else '#ef4444' for x in df['Relative Performance']]
         fig = go.Figure(go.Bar(x=df['Relative Performance'], y=df['Name'], orientation='h', marker_color=colors))
-        fig.update_layout(title=title, xaxis_title="Outperformance vs SPY (%)", yaxis_title="", plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', yaxis={'categoryorder':'total ascending'}, margin=dict(l=20, r=20, t=40, b=20), height=400)
+        fig.update_layout(title=title, xaxis_title="Change in Ratio vs SPY (x100)", yaxis_title="", plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', yaxis={'categoryorder':'total ascending'}, margin=dict(l=20, r=20, t=40, b=20), height=400)
         return fig
 
     return create_bar_fig(relative_perf_daily_df, "vs. SPY (Today)"), create_bar_fig(relative_perf_1m_df, "vs. SPY (Last 21 Days)"), create_bar_fig(relative_perf_ytd_df, "vs. SPY (Year-to-Date)")
@@ -699,6 +715,3 @@ def run_dashboard():
 
 if __name__ == "__main__":
     run_dashboard()
-
-
-
