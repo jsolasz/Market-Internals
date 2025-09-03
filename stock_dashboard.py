@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore")
 # --- Page Configuration ---
 st.set_page_config(
     page_title="Market Internals Dashboard",
-    page_icon="📊",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -161,7 +161,9 @@ def get_market_caps(tickers):
     """Fetches and caches market cap data for a list of tickers."""
     cached = _load_cached_market_caps()
     if cached:
-        return cached
+        # Return only the caps for the tickers requested
+        return {k: v for k, v in cached.items() if k in tickers}
+
 
     market_caps_info = {}
     tickers_obj = yf.Tickers(tickers)
@@ -262,8 +264,12 @@ def build_distribution(vals, wts, grid, bw=0.60):
 
 def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
     map_tickers = list(ticker_map.values())
+    if daily_data.empty or intraday_data.empty: # Add check for empty data
+        empty_fig = go.Figure().update_layout(title_text="Not enough data", plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white')
+        return empty_fig, empty_fig, empty_fig
+        
     daily_closes = daily_data.xs('Close', level=1, axis=1)
-
+    
     # --- Daily Relative Performance (Normalized Ratio Method) ---
     last_close_etfs_all = daily_closes.iloc[-2]
     current_price_etfs_all = intraday_data.xs('Close', level=1, axis=1).iloc[-1]
@@ -294,15 +300,17 @@ def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
 
     # --- YTD Relative Performance (Normalized Ratio Method) ---
     relative_perf_ytd = pd.Series(dtype='float64')
-    ytd_start_date = daily_closes.index[daily_closes.index.year == datetime.now().year].min()
-    data_ytd = daily_closes.loc[ytd_start_date:]
-    if 'SPY' in data_ytd.columns and not data_ytd.empty:
-        valid_map_tickers_ytd = [t for t in map_tickers if t in data_ytd.columns]
-        rel_ytd = data_ytd[valid_map_tickers_ytd].div(data_ytd['SPY'], axis=0).dropna()
-        if not rel_ytd.empty:
-            rel_norm_ytd = rel_ytd - rel_ytd.iloc[0]
-            relative_perf_ytd = rel_norm_ytd.iloc[-1] * 100
-        
+    ytd_start_date_series = daily_closes.index[daily_closes.index.year == datetime.now().year]
+    if not ytd_start_date_series.empty:
+        ytd_start_date = ytd_start_date_series.min()
+        data_ytd = daily_closes.loc[ytd_start_date:]
+        if 'SPY' in data_ytd.columns and not data_ytd.empty:
+            valid_map_tickers_ytd = [t for t in map_tickers if t in data_ytd.columns]
+            rel_ytd = data_ytd[valid_map_tickers_ytd].div(data_ytd['SPY'], axis=0).dropna()
+            if not rel_ytd.empty:
+                rel_norm_ytd = rel_ytd - rel_ytd.iloc[0]
+                relative_perf_ytd = rel_norm_ytd.iloc[-1] * 100
+            
     relative_perf_ytd_df = pd.DataFrame({'Name': [k for k, v in ticker_map.items() if v in relative_perf_ytd.index], 'Relative Performance': relative_perf_ytd.values}).sort_values('Relative Performance', ascending=False)
     
     def create_bar_fig(df, title):
@@ -396,7 +404,16 @@ def create_sp500_scatter_plot(daily_closes, sp500_df, market_caps_info):
 
 # --- Main Dashboard Execution ---
 def run_dashboard():
-    st.title("Market Internals Dashboard")
+    # --- Top Bar with Title and Refresh Button ---
+    col1, col2 = st.columns([0.85, 0.15])
+    with col1:
+        st.title("Market Internals Dashboard")
+    with col2:
+        st.write("") # Adds vertical space to align button
+        if st.button("Refresh Data", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+            
     st.markdown("An overview of S&P 500 market health and performance, powered by real-time data.")
 
     # --- Live Clock ---
@@ -418,48 +435,123 @@ def run_dashboard():
         </script>
     """, height=30)
 
-
-    with st.spinner('Loading S&P 500 component data and market prices...'):
-        sp500_df = get_sp500_tickers()
-        if sp500_df.empty:
-            st.error("Failed to retrieve S&P 500 ticker list. Dashboard cannot be loaded.")
-            return
+    # #################################################################################
+    # --- STAGE 1: Load and display essential, high-level market data (FAST) ---
+    # #################################################################################
+    
+    sp500_df = get_sp500_tickers()
+    if sp500_df.empty:
+        st.error("Failed to retrieve S&P 500 ticker list. Dashboard cannot be loaded.")
+        return
         
-        tickers = sp500_df['Symbol'].tolist()
-        sector_etfs = list(SECTOR_ETF_MAP.values())
-        factor_etfs = list(FACTOR_ETF_MAP.values())
-        tickers_with_etfs = list(set(tickers + ['SPY', 'RSP', '^GSPC'] + sector_etfs + factor_etfs))
+    essential_tickers = ['SPY', 'RSP', '^GSPC', '^VIX'] + list(SECTOR_ETF_MAP.values()) + list(FACTOR_ETF_MAP.values())
+    
+    with st.spinner('Loading essential market data (SPX, ETFs)...'):
+        daily_data_essentials, intraday_data_essentials = get_stock_data(list(set(essential_tickers)))
+        if daily_data_essentials.empty or intraday_data_essentials.empty:
+            st.warning("Could not load essential market data. Some components may be unavailable.")
         
-        daily_data, intraday_data = get_stock_data(tickers_with_etfs)
-        if daily_data.empty or len(daily_data) < 201:
-            st.error("Failed to load sufficient historical market data. Please try again later.")
-            return
-
-    # --- Fetch Market Caps for all S&P 500 stocks ---
-    with st.spinner('Fetching market caps for S&P 500 constituents...'):
-        valid_daily_tickers = [t for t in sp500_df['Symbol'].unique() if (t, 'Close') in daily_data.columns]
-        market_caps_info = get_market_caps(valid_daily_tickers)
-
-
     st.header("S&P 500 (SPX) Performance")
-    spx_col = ('^GSPC', 'Close') if isinstance(daily_data.columns, pd.MultiIndex) else 'Close'
-    if spx_col not in daily_data.columns:
+    spx_col = ('^GSPC', 'Close') if ('^GSPC', 'Close') in daily_data_essentials.columns else None
+    if spx_col is None:
         st.warning("Could not load S&P 500 index data for performance metrics.")
     else:
-        spx_data = daily_data[spx_col].dropna()
+        spx_data = daily_data_essentials[spx_col].dropna()
         periods = {"1 Day": 1, "1 Week": 5, "1 Month": 21, "3 Months": 63, "YTD": None}
         cols = st.columns(5)
         for i, (period_name, period_days) in enumerate(periods.items()):
             change = 0.0
             if period_name == "YTD":
-                ytd_start_date = spx_data.index[spx_data.index.year == datetime.now().year].min()
-                start_price = spx_data.loc[ytd_start_date]
-                if start_price > 0: change = ((spx_data.iloc[-1] - start_price) / start_price) * 100
+                ytd_start_date_series = spx_data.index[spx_data.index.year == datetime.now().year]
+                if not ytd_start_date_series.empty:
+                    ytd_start_date = ytd_start_date_series.min()
+                    start_price = spx_data.loc[ytd_start_date]
+                    if start_price > 0: change = ((spx_data.iloc[-1] - start_price) / start_price) * 100
             elif len(spx_data) > period_days:
                 change = (spx_data.pct_change(period_days).iloc[-1]) * 100
             cols[i].metric(label=period_name, value=f"{change:.2f}%", delta_color="normal" if change >= 0 else "inverse")
 
     st.divider()
+
+    st.header("Seasonality Analysis")
+    season_col1, season_col2 = st.columns(2)
+    with season_col1:
+        avg_seasonality, current_ytd_seasonality = get_seasonality_data()
+        if avg_seasonality is not None and current_ytd_seasonality is not None:
+            fig_season = go.Figure()
+            fig_season.add_trace(go.Scatter(x=avg_seasonality.index, y=avg_seasonality.values, mode='lines', name='50-Year Average', line=dict(color='#636EFA')))
+            fig_season.add_trace(go.Scatter(x=current_ytd_seasonality.index, y=current_ytd_seasonality['Cumulative YTD'], mode='lines', name=f'{datetime.now().year} Performance', line=dict(color='#FFA15A', width=3)))
+            tickvals = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+            ticktext = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            fig_season.update_layout(title='SPX Seasonality', xaxis_title='Time of Year', yaxis_title='Cumulative Performance (%)', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), xaxis=dict(tickvals=tickvals, ticktext=ticktext, gridcolor='rgba(255, 255, 255, 0.1)'), yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'), height=800)
+            st.plotly_chart(fig_season, use_container_width=True)
+    with season_col2:
+        avg_vix_seasonality, current_ytd_vix = get_vix_seasonality_data()
+        if avg_vix_seasonality is not None and current_ytd_vix is not None:
+            avg_ser = avg_vix_seasonality
+            cur_ser = current_ytd_vix['Cumulative YTD'] if 'Cumulative YTD' in current_ytd_vix.columns else current_ytd_vix.squeeze()
+            N = int(avg_ser.index.max())
+            day_of_year_ticks = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+            tickvals = [max(1, round(d * N / 365)) for d in day_of_year_ticks]
+            ticktext = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+            fig_vix_season = go.Figure()
+            fig_vix_season.add_trace(go.Scatter(x=avg_ser.index.astype(int), y=avg_ser.astype(float), mode='lines', name='20-Year Median VIX', line=dict(color='#636EFA')))
+            if not cur_ser.empty:
+                fig_vix_season.add_trace(go.Scatter(x=cur_ser.index.astype(int), y=cur_ser.astype(float), mode='lines', name=f'{datetime.now().year} VIX', line=dict(color='#FFA15A', width=3)))
+            fig_vix_season.update_layout(title='VIX Seasonality', xaxis_title='Time of Year', yaxis_title='VIX Change (%)', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), height=800)
+            fig_vix_season.update_xaxes(tickmode='array', tickvals=tickvals, ticktext=ticktext, range=[1, N], gridcolor='rgba(255,255,255,0.1)')
+            fig_vix_season.update_yaxes(gridcolor='rgba(255,255,255,0.1)')
+            st.plotly_chart(fig_vix_season, use_container_width=True)
+    
+    st.divider()
+
+    st.header("Sector Analysis")
+    sec_fig_d, sec_fig_1m, sec_fig_ytd = create_relative_performance_charts(daily_data_essentials, intraday_data_essentials, SECTOR_ETF_MAP)
+    c1, c2, c3 = st.columns(3)
+    with c1: st.plotly_chart(sec_fig_d, use_container_width=True)
+    with c2: st.plotly_chart(sec_fig_1m, use_container_width=True)
+    with c3: st.plotly_chart(sec_fig_ytd, use_container_width=True)
+    
+    sector_scatter_fig = create_performance_scatter_plot(daily_data_essentials.xs('Close', level=1, axis=1), SECTOR_ETF_MAP)
+    st.plotly_chart(sector_scatter_fig, use_container_width=True)
+
+    st.divider()
+    st.header("Factor Analysis")
+    fac_fig_d, fac_fig_1m, fac_fig_ytd = create_relative_performance_charts(daily_data_essentials, intraday_data_essentials, FACTOR_ETF_MAP)
+    c1, c2, c3 = st.columns(3)
+    with c1: st.plotly_chart(fac_fig_d, use_container_width=True)
+    with c2: st.plotly_chart(fac_fig_1m, use_container_width=True)
+    with c3: st.plotly_chart(fac_fig_ytd, use_container_width=True)
+    
+    factor_scatter_fig = create_performance_scatter_plot(daily_data_essentials.xs('Close', level=1, axis=1), FACTOR_ETF_MAP)
+    st.plotly_chart(factor_scatter_fig, use_container_width=True)
+    
+    st.divider()
+
+    # #################################################################################
+    # --- STAGE 2: Load and display full S&P 500 constituent data (SLOWER) ---
+    # #################################################################################
+    
+    details_placeholder = st.empty()
+    with details_placeholder.container():
+        st.info("Loading detailed S&P 500 constituent data... This may take a minute.")
+        st.spinner("Fetching data for ~500 stocks and calculating market caps...")
+
+    tickers = sp500_df['Symbol'].tolist()
+    daily_data, intraday_data = get_stock_data(list(set(tickers + essential_tickers)))
+    
+    valid_daily_tickers = [t for t in tickers if (t, 'Close') in daily_data.columns]
+    market_caps_info = get_market_caps(valid_daily_tickers)
+    
+    details_placeholder.empty()
+
+    # --- Render the rest of the dashboard using the FULL dataset ---
+    
+    st.header("S&P 500 Constituent Momentum")
+    sp500_scatter_fig = create_sp500_scatter_plot(daily_data.xs('Close', level=1, axis=1), sp500_df, market_caps_info)
+    st.plotly_chart(sp500_scatter_fig, use_container_width=True)
+    st.divider()
+    
     st.header("S&P 500 Volume Analysis")
     valid_tickers_daily = [t for t in tickers if (t, 'Volume') in daily_data.columns]
     total_daily_sp500_volume = daily_data.xs('Volume', level=1, axis=1)[valid_tickers_daily].sum(axis=1)
@@ -486,29 +578,34 @@ def run_dashboard():
     vol_cols[1].metric("Avg Volume (30-day)", format_volume(avg_vol_90d))
     vol_cols[2].metric("Avg Volume (Up Days)", format_volume(up_days_volume))
     vol_cols[3].metric("Avg Volume (Down Days)", format_volume(down_days_volume))
-    st.divider()
-
+    
     price_change = None
+    perf_df = pd.DataFrame() # Initialize perf_df
+    
     if not (intraday_data.empty or len(intraday_data) < 2):
         try:
             intraday_data.index = intraday_data.index.tz_convert('America/New_York')
         except TypeError:
             intraday_data.index = intraday_data.index.tz_localize('UTC').tz_convert('America/New_York')
-        valid_tickers = [t for t in tickers if (t, 'Close') in daily_data.columns and (t, 'Close') in intraday_data.columns]
-        last_close = daily_data.xs('Close', level=1, axis=1)[valid_tickers].iloc[-2]
-        current_price = intraday_data.xs('Close', level=1, axis=1)[valid_tickers].iloc[-1]
+        
+        intraday_data = intraday_data.between_time('09:30', '16:00')
+        
+        valid_tickers_full = [t for t in tickers if (t, 'Close') in daily_data.columns and (t, 'Close') in intraday_data.columns]
+        last_close = daily_data.xs('Close', level=1, axis=1)[valid_tickers_full].iloc[-2]
+        current_price = intraday_data.xs('Close', level=1, axis=1)[valid_tickers_full].iloc[-1]
         price_change = current_price - last_close
         advancing = (price_change > 0).sum()
         declining = (price_change < 0).sum()
-        intraday_volumes = intraday_data.xs('Volume', level=1, axis=1)[valid_tickers]
+        intraday_volumes = intraday_data.xs('Volume', level=1, axis=1)[valid_tickers_full]
         total_share_volume = intraday_volumes.sum()
         adv_share_volume = total_share_volume[price_change > 0].sum()
         dec_share_volume = total_share_volume[price_change < 0].sum()
-        intraday_closes = intraday_data.xs('Close', level=1, axis=1)[valid_tickers]
+        intraday_closes = intraday_data.xs('Close', level=1, axis=1)[valid_tickers_full]
         dollar_volume_per_bar = intraday_closes * intraday_volumes
         total_dollar_volume = dollar_volume_per_bar.sum()
         up_dollar_volume = total_dollar_volume[price_change > 0].sum()
         down_dollar_volume = total_dollar_volume[price_change < 0].sum()
+        
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("S&P 500 Breadth (Advancers/Decliners)")
@@ -522,14 +619,66 @@ def run_dashboard():
             up_dollar_str = f"{up_dollar_volume/1e9:.2f}B"; down_dollar_str = f"{down_dollar_volume/1e9:.2f}B"
             st.markdown(f"Up Vol (USD): <font color='green'>{up_dollar_str}</font> | Down Vol (USD): <font color='red'>{down_dollar_str}</font>", unsafe_allow_html=True)
             if (up_dollar_volume + down_dollar_volume) > 0: st.progress(up_dollar_volume / (up_dollar_volume + down_dollar_volume))
+
+        # --- NEW: TOP CONTRIBUTORS / DETRACTORS SECTION ---
+        st.subheader("Top Index Movers (by Contribution)")
+        valid_caps = {t: market_caps_info[t]['marketCap'] for t in market_caps_info if 'marketCap' in market_caps_info.get(t, {})}
+        mcap_df = pd.DataFrame.from_dict(valid_caps, orient='index', columns=['Market Cap'])
+        perf_df = pd.concat([(price_change / last_close * 100).rename('% Change'), mcap_df], axis=1).dropna()
+
+        if not perf_df.empty:
+            total_market_cap = perf_df['Market Cap'].sum()
+            perf_df['Weight'] = perf_df['Market Cap'] / total_market_cap
+            perf_df['Contribution'] = perf_df['Weight'] * perf_df['% Change']
+            
+            top_contributors = perf_df.sort_values('Contribution', ascending=False).head(10)
+            top_detractors = perf_df.sort_values('Contribution', ascending=True).head(10)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = go.Figure(go.Bar(
+                    x=top_contributors['Contribution'],
+                    y=top_contributors.index,
+                    orientation='h',
+                    text=[f"{chg:.2f}%" for chg in top_contributors['% Change']],
+                    textposition='outside',
+                    marker_color='#10b981'
+                ))
+                fig.update_layout(
+                    title="Top Contributors",
+                    xaxis_title="Contribution to SPX Change (%)",
+                    yaxis=dict(autorange="reversed"),
+                    plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
+                    margin=dict(l=20, r=20, t=40, b=20), height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                fig = go.Figure(go.Bar(
+                    x=top_detractors['Contribution'],
+                    y=top_detractors.index,
+                    orientation='h',
+                    text=[f"{chg:.2f}%" for chg in top_detractors['% Change']],
+                    textposition='outside',
+                    marker_color='#ef4444'
+                ))
+                fig.update_layout(
+                    title="Top Detractors",
+                    xaxis_title="Contribution to SPX Change (%)",
+                    yaxis=dict(autorange="reversed"),
+                    plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
+                     margin=dict(l=20, r=20, t=40, b=20), height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
         st.divider()
+
         spy_daily = daily_data['SPY'].dropna()
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Intraday Performance")
             spy_intra = (intraday_data[('SPY', 'Close')].pct_change().cumsum() * 100).fillna(0)
             rsp_intra = (intraday_data[('RSP', 'Close')].pct_change().cumsum() * 100).fillna(0)
-            intraday_prices = intraday_data.xs('Close', level=1, axis=1)[valid_tickers].ffill()
+            intraday_prices = intraday_data.xs('Close', level=1, axis=1)[valid_tickers_full].ffill()
             adv_dec_line = (intraday_prices > last_close).sum(axis=1) - (intraday_prices < last_close).sum(axis=1)
             fig_spy_rsp = go.Figure()
             fig_spy_rsp.add_trace(go.Scatter(x=spy_intra.index.time, y=spy_intra, mode='lines', name='SPY (Market Cap Weighted)', line=dict(color='#636EFA')))
@@ -563,96 +712,32 @@ def run_dashboard():
                 st.plotly_chart(fig_daily_spy, use_container_width=True)
         with col2:
             st.subheader("% Stocks Above MA")
-            close_prices = daily_data.xs('Close', level=1, axis=1)[valid_tickers]
+            close_prices = daily_data.xs('Close', level=1, axis=1)[valid_tickers_full]
             ma_periods = [10, 20, 50, 200]
             for ma in ma_periods:
                 if len(close_prices) >= ma:
                     sma = close_prices.rolling(window=ma).mean().iloc[-1]
                     above_ma = (close_prices.iloc[-1] > sma).sum()
-                    below_ma = len(valid_tickers) - above_ma
+                    below_ma = len(valid_tickers_full) - above_ma
                     metric_col, chart_col = st.columns([1, 1])
                     with metric_col:
-                        st.metric(label=f"{ma}-Day MA", value=f"{above_ma / len(valid_tickers) * 100:.1f}%")
+                        st.metric(label=f"{ma}-Day MA", value=f"{above_ma / len(valid_tickers_full) * 100:.1f}%")
                     with chart_col:
                         fig_pie = go.Figure(data=[go.Pie(labels=['Above', 'Below'], values=[above_ma, below_ma], marker_colors=['#10b981', '#ef4444'], hole=.4, textinfo='none')])
                         fig_pie.update_layout(showlegend=False, margin=dict(l=0, r=0, t=0, b=0), height=80, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                         st.plotly_chart(fig_pie, use_container_width=True, key=f"ma_pie_{ma}")
-            st.subheader("SPY Daily Chart")
+            
+            st.subheader("A/D Line (Intraday)")
             fig_adv_dec = go.Figure()
             fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line, mode='lines', name='Net A/D', line=dict(color='white')))
             fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line.where(adv_dec_line >= 0), fill='tozeroy', mode='none', fillcolor='rgba(16, 185, 129, 0.5)'))
             fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line.where(adv_dec_line <= 0), fill='tozeroy', mode='none', fillcolor='rgba(239, 68, 68, 0.5)'))
-            fig_adv_dec.update_layout(title='Advancing - Declining Stocks (Intraday Net)', yaxis_range=[-505, 505], yaxis_title='Net Advancing Stocks', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', showlegend=False)
+            fig_adv_dec.update_layout(title='Advancing - Declining Stocks (Net)', yaxis_range=[-505, 505], yaxis_title='Net Advancing Stocks', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', showlegend=False)
             st.plotly_chart(fig_adv_dec, use_container_width=True)
         st.divider()
 
-    st.header("Seasonality Analysis")
-    season_col1, season_col2 = st.columns(2)
-    with season_col1:
-        avg_seasonality, current_ytd_seasonality = get_seasonality_data()
-        if avg_seasonality is not None and current_ytd_seasonality is not None:
-            fig_season = go.Figure()
-            fig_season.add_trace(go.Scatter(x=avg_seasonality.index, y=avg_seasonality.values, mode='lines', name='50-Year Average', line=dict(color='#636EFA')))
-            fig_season.add_trace(go.Scatter(x=current_ytd_seasonality.index, y=current_ytd_seasonality['Cumulative YTD'], mode='lines', name=f'{datetime.now().year} Performance', line=dict(color='#FFA15A', width=3)))
-            tickvals = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
-            ticktext = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            fig_season.update_layout(title='SPX Seasonality', xaxis_title='Time of Year', yaxis_title='Cumulative Performance (%)', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), xaxis=dict(tickvals=tickvals, ticktext=ticktext, gridcolor='rgba(255, 255, 255, 0.1)'), yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'), height=800)
-            st.plotly_chart(fig_season, use_container_width=True)
-    with season_col2:
-        avg_vix_seasonality, current_ytd_vix = get_vix_seasonality_data()
-        if avg_vix_seasonality is not None and current_ytd_vix is not None:
-            avg_ser = avg_vix_seasonality
-            cur_ser = current_ytd_vix['Cumulative YTD'] if 'Cumulative YTD' in current_ytd_vix.columns else current_ytd_vix.squeeze()
-            N = int(avg_ser.index.max())
-            day_of_year_ticks = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
-            tickvals = [max(1, round(d * N / 365)) for d in day_of_year_ticks]
-            ticktext = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-            fig_vix_season = go.Figure()
-            fig_vix_season.add_trace(go.Scatter(x=avg_ser.index.astype(int), y=avg_ser.astype(float), mode='lines', name='20-Year Median VIX', line=dict(color='#636EFA')))
-            if not cur_ser.empty:
-                fig_vix_season.add_trace(go.Scatter(x=cur_ser.index.astype(int), y=cur_ser.astype(float), mode='lines', name=f'{datetime.now().year} VIX', line=dict(color='#FFA15A', width=3)))
-            fig_vix_season.update_layout(title='VIX Seasonality', xaxis_title='Time of Year', yaxis_title='VIX Change (%)', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), height=800)
-            fig_vix_season.update_xaxes(tickmode='array', tickvals=tickvals, ticktext=ticktext, range=[1, N], gridcolor='rgba(255,255,255,0.1)')
-            fig_vix_season.update_yaxes(gridcolor='rgba(255,255,255,0.1)')
-            st.plotly_chart(fig_vix_season, use_container_width=True)
-
-    st.divider()
-    st.header("Sector Analysis")
-    sec_fig_d, sec_fig_1m, sec_fig_ytd = create_relative_performance_charts(daily_data, intraday_data, SECTOR_ETF_MAP)
-    c1, c2, c3 = st.columns(3)
-    with c1: st.plotly_chart(sec_fig_d, use_container_width=True)
-    with c2: st.plotly_chart(sec_fig_1m, use_container_width=True)
-    with c3: st.plotly_chart(sec_fig_ytd, use_container_width=True)
-    
-    sector_scatter_fig = create_performance_scatter_plot(daily_data.xs('Close', level=1, axis=1), SECTOR_ETF_MAP)
-    st.plotly_chart(sector_scatter_fig, use_container_width=True)
-
-    st.divider()
-    st.header("Factor Analysis")
-    fac_fig_d, fac_fig_1m, fac_fig_ytd = create_relative_performance_charts(daily_data, intraday_data, FACTOR_ETF_MAP)
-    c1, c2, c3 = st.columns(3)
-    with c1: st.plotly_chart(fac_fig_d, use_container_width=True)
-    with c2: st.plotly_chart(fac_fig_1m, use_container_width=True)
-    with c3: st.plotly_chart(fac_fig_ytd, use_container_width=True)
-    
-    factor_scatter_fig = create_performance_scatter_plot(daily_data.xs('Close', level=1, axis=1), FACTOR_ETF_MAP)
-    st.plotly_chart(factor_scatter_fig, use_container_width=True)
-    
-    st.divider()
-    
-    st.header("S&P 500 Constituent Momentum")
-    sp500_scatter_fig = create_sp500_scatter_plot(daily_data.xs('Close', level=1, axis=1), sp500_df, market_caps_info)
-    st.plotly_chart(sp500_scatter_fig, use_container_width=True)
-
-    st.divider()
-
-    if price_change is not None:
+    if price_change is not None and not perf_df.empty:
         st.subheader("S&P 500 Daily Return Distribution")
-        # Use the already fetched market_caps_info
-        valid_caps = {t: market_caps_info[t]['marketCap'] for t in market_caps_info if 'marketCap' in market_caps_info[t]}
-        mcap_df = pd.DataFrame.from_dict(valid_caps, orient='index', columns=['Market Cap'])
-        perf_df = pd.concat([(price_change / last_close * 100).rename('% Change'), mcap_df], axis=1).dropna()
-        perf_df.index.name = 'Symbol'
         if perf_df.empty or perf_df['% Change'].isnull().all():
             st.warning("Could not generate the return distribution chart. Data is incomplete.")
         else:
