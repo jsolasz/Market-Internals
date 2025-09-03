@@ -344,19 +344,28 @@ def create_pcr_gauge(pcr_value):
 
 def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
     map_tickers = list(ticker_map.values())
-    if daily_data.empty or intraday_data.empty: # Add check for empty data
+    if daily_data.empty: 
         empty_fig = go.Figure().update_layout(title_text="Not enough data", plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white')
         return empty_fig, empty_fig, empty_fig
         
     daily_closes = daily_data.xs('Close', level=1, axis=1)
     
     # --- Daily Relative Performance (Normalized Ratio Method) ---
+    # Get yesterday's close as the base price
     last_close_etfs_all = daily_closes.iloc[-2]
-    current_price_etfs_all = intraday_data.xs('Close', level=1, axis=1).iloc[-1]
     
+    # --- FIX: Create a robust 'current_price' series ---
+    # Start with the latest daily close as a fallback
+    current_price_etfs_all = daily_closes.iloc[-1]
+    # If intraday data is available, get the latest price and update the series
+    if not intraday_data.empty:
+        latest_intraday_prices = intraday_data.xs('Close', level=1, axis=1).iloc[-1]
+        current_price_etfs_all.update(latest_intraday_prices) # Overwrite daily with intraday where available
+
     relative_perf_daily = pd.Series(dtype='float64')
     if 'SPY' in last_close_etfs_all and 'SPY' in current_price_etfs_all and last_close_etfs_all.get('SPY', 0) != 0 and current_price_etfs_all.get('SPY', 0) != 0:
-        valid_map_tickers = [t for t in map_tickers if t in last_close_etfs_all and t in current_price_etfs_all]
+        # Now, we can find all tickers that have both a yesterday and current price
+        valid_map_tickers = [t for t in map_tickers if t in last_close_etfs_all.index and t in current_price_etfs_all.index]
         
         start_ratio = last_close_etfs_all[valid_map_tickers] / last_close_etfs_all['SPY']
         end_ratio = current_price_etfs_all[valid_map_tickers] / current_price_etfs_all['SPY']
@@ -400,7 +409,6 @@ def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
         return fig
 
     return create_bar_fig(relative_perf_daily_df, "vs. SPY (Today)"), create_bar_fig(relative_perf_1m_df, "vs. SPY (Last 21 Days)"), create_bar_fig(relative_perf_ytd_df, "vs. SPY (Year-to-Date)")
-
 def create_performance_scatter_plot(daily_closes, ticker_map):
     today = pd.Timestamp.now()
     current_q_start = today - pd.tseries.offsets.QuarterBegin(startingMonth=1)
