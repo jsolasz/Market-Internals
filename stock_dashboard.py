@@ -324,7 +324,7 @@ def create_pcr_gauge(pcr_value):
             'steps': [
                 {'range': [0, 1], 'color': 'rgba(16, 185, 129, 0.7)'}, # Bullish
                 {'range': [1, 1.25], 'color': 'rgba(245, 158, 11, 0.6)'}, # Neutral
-                {'range': [1.2, 2.0], 'color': 'rgba(239, 68, 68, 0.7)'}  # Bearish
+                {'range': [1.25, 2.0], 'color': 'rgba(239, 68, 68, 0.7)'}  # Bearish
             ],
             'threshold': {
                 'line': {'color': "red", 'width': 4},
