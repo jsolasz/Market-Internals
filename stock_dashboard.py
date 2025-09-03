@@ -605,7 +605,7 @@ def run_dashboard():
     st.divider()
 
     # --- NEW: PCR Section ---
-    st.header("Market Sentiment Indicators")
+    st.header("SPX Put/Call Ratio")
     with st.spinner("Loading Put/Call Ratio data..."):
         pcr_ticker, pcr_value, pcr_totals, pcr_expirations = get_pcr_data(n_expirations=20)
     
