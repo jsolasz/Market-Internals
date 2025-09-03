@@ -1,11 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Aug 29 14:37:14 2025
 
-@author: jacksolasz
-
-"""
 
 import streamlit as st
 import pandas as pd
@@ -17,6 +10,8 @@ from datetime import datetime
 import os, json, time, pathlib, warnings
 import numpy as np
 import streamlit.components.v1 as components
+import pytz
+
 
 # SciPy is optional for KDE but provides better results.
 try:
@@ -63,6 +58,9 @@ FACTOR_ETF_MAP = {
     "Speculative Tech": "ARKK",
     "High Beta": "SPHB",
 }
+# Constants for PCR calculation
+PCR_INDEX_TICKERS = ["^SPX", "SPX", "^GSPC"]
+PCR_FALLBACK_TICKER = "SPY"
 
 
 # --- Custom CSS for Theming ---
@@ -187,6 +185,55 @@ def get_stock_data(tickers):
     data_intraday = yf.download(ticker_str, period="1d", interval="5m", group_by='ticker', auto_adjust=True, progress=False)
     return data_daily, data_intraday
 
+# --- NEW: PCR Data Fetching Function (from pcr.py) ---
+@st.cache_data(ttl=600)
+def get_pcr_data(n_expirations: int = 20):
+    """
+    Finds a working ticker, gets expirations, and calculates the PCR metrics.
+    Caches the result for 10 minutes.
+    """
+    # 1. Find a working ticker
+    ticker = PCR_FALLBACK_TICKER # Start with fallback
+    for tkr in PCR_INDEX_TICKERS:
+        try:
+            if yf.Ticker(tkr).options:
+                ticker = tkr
+                break
+        except Exception:
+            continue
+
+    # 2. Get the nearest N expirations
+    all_expirations = yf.Ticker(ticker).options or []
+    expirations_to_use = all_expirations[:n_expirations]
+    if not expirations_to_use:
+        return None, None, None, "No expirations found."
+
+    # 3. Aggregate metrics across expirations
+    totals = {"call_vol": 0.0, "put_vol": 0.0}
+    for e in expirations_to_use:
+        try:
+            opt = yf.Ticker(ticker).option_chain(e)
+            calls = opt.calls.copy()
+            puts  = opt.puts.copy()
+
+            # Ensure volume column exists and is numeric
+            for df in (calls, puts):
+                if "volume" not in df.columns: df["volume"] = 0
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+
+            totals["call_vol"] += float(calls["volume"].sum())
+            totals["put_vol"]  += float(puts["volume"].sum())
+        except Exception:
+            # Skip expiration if it fails to load
+            continue
+    
+    # 4. Calculate PCR
+    denom = totals["call_vol"]
+    num   = totals["put_vol"]
+    pcr = (num / denom) if denom > 0 else (float("inf") if num > 0 else 0.0)
+    
+    return ticker, pcr, totals, expirations_to_use
+
 @st.cache_data(ttl=3600*6)
 def get_seasonality_data():
     """Fetches and calculates SPX seasonality for the last 50 years."""
@@ -261,6 +308,39 @@ def build_distribution(vals, wts, grid, bw=0.60):
     return y
 
 # --- REFACTORED/REUSABLE ANALYSIS FUNCTIONS ---
+
+def create_pcr_gauge(pcr_value):
+    """Creates a Plotly gauge chart for the Put/Call Ratio."""
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = pcr_value,
+        title = {'text': "Put/Call Ratio (Volume)"},
+        gauge = {
+            'axis': {'range': [0, 2], 'tickwidth': 1, 'tickcolor': "darkblue"},
+            'bar': {'color': "#0E1117"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [0, 0.7], 'color': 'rgba(16, 185, 129, 0.7)'}, # Bullish
+                {'range': [0.7, 1.0], 'color': 'rgba(245, 158, 11, 0.6)'}, # Neutral
+                {'range': [1.0, 2.0], 'color': 'rgba(239, 68, 68, 0.7)'}  # Bearish
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 1.5
+            }
+        }
+    ))
+    fig.update_layout(
+        paper_bgcolor='#0E1117',
+        font={'color': 'white'},
+        height=300,
+        # Increased top margin from 40 to 80 to prevent title cutoff
+        margin=dict(l=20, r=20, t=80, b=20)
+    )
+    return fig
 
 def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
     map_tickers = list(ticker_map.values())
@@ -457,19 +537,90 @@ def run_dashboard():
         st.warning("Could not load S&P 500 index data for performance metrics.")
     else:
         spx_data = daily_data_essentials[spx_col].dropna()
-        periods = {"1 Day": 1, "1 Week": 5, "1 Month": 21, "3 Months": 63, "YTD": None}
-        cols = st.columns(5)
+        
+        # Updated periods to include Previous Qtr
+        periods = {"1 Day": 1, "1 Week": 5, "MTD": None, "QTD": None, "Previous Qtr": None, "YTD": None}
+        cols = st.columns(len(periods))
+        
+        latest_date = spx_data.index[-1]
+        latest_price = spx_data.iloc[-1]
+        
+        # Ensure timezone from data is used for calculations if it exists
+        tz = latest_date.tz
+
         for i, (period_name, period_days) in enumerate(periods.items()):
             change = 0.0
-            if period_name == "YTD":
-                ytd_start_date_series = spx_data.index[spx_data.index.year == datetime.now().year]
-                if not ytd_start_date_series.empty:
-                    ytd_start_date = ytd_start_date_series.min()
-                    start_price = spx_data.loc[ytd_start_date]
-                    if start_price > 0: change = ((spx_data.iloc[-1] - start_price) / start_price) * 100
-            elif len(spx_data) > period_days:
-                change = (spx_data.pct_change(period_days).iloc[-1]) * 100
+            
+            # Logic for fixed periods (1 Day, 1 Week)
+            if period_days is not None:
+                if len(spx_data) >= period_days + 1:
+                    start_price = spx_data.iloc[-(period_days + 1)]
+                    if start_price > 0:
+                        change = ((latest_price - start_price) / start_price) * 100
+            
+            # Logic for date-based periods
+            else:
+                # --- NEW: Handle Previous Quarter separately as it's a closed period ---
+                if period_name == "Previous Qtr":
+                    current_quarter_start = pd.Timestamp(latest_date.date()) - pd.tseries.offsets.QuarterBegin(startingMonth=1)
+                    prev_quarter_end = current_quarter_start - pd.DateOffset(days=1)
+                    prev_quarter_start = prev_quarter_end - pd.tseries.offsets.QuarterBegin(startingMonth=1)
+                    
+                    if tz:
+                        prev_quarter_start = prev_quarter_start.tz_localize(tz)
+                        prev_quarter_end = prev_quarter_end.tz_localize(tz)
+                    
+                    # Filter data to the previous quarter's date range
+                    prev_quarter_data = spx_data[(spx_data.index >= prev_quarter_start) & (spx_data.index <= prev_quarter_end)]
+
+                    if len(prev_quarter_data) >= 2:
+                        start_price = prev_quarter_data.iloc[0]
+                        end_price = prev_quarter_data.iloc[-1]
+                        if start_price > 0:
+                            change = ((end_price - start_price) / start_price) * 100
+                
+                # Logic for MTD, QTD, YTD which all run to the latest price
+                else:
+                    start_date = None
+                    if period_name == "MTD":
+                        start_date = pd.Timestamp(year=latest_date.year, month=latest_date.month, day=1)
+                    elif period_name == "QTD":
+                        start_date = pd.Timestamp(latest_date.date()) - pd.tseries.offsets.QuarterBegin(startingMonth=1)
+                    elif period_name == "YTD":
+                        start_date = pd.Timestamp(year=latest_date.year, month=1, day=1)
+
+                    if start_date:
+                        # Localize start_date to match the data's timezone
+                        if tz:
+                            start_date = start_date.tz_localize(tz)
+                        
+                        # Find the first trading day's price on or after the start_date
+                        period_data = spx_data[spx_data.index >= start_date]
+                        if not period_data.empty:
+                            start_price = period_data.iloc[0]
+                            if start_price > 0:
+                                change = ((latest_price - start_price) / start_price) * 100
+                            
             cols[i].metric(label=period_name, value=f"{change:.2f}%", delta_color="normal" if change >= 0 else "inverse")
+    st.divider()
+
+    # --- NEW: PCR Section ---
+    st.header("Market Sentiment Indicators")
+    with st.spinner("Loading Put/Call Ratio data..."):
+        pcr_ticker, pcr_value, pcr_totals, pcr_expirations = get_pcr_data(n_expirations=20)
+    
+    if pcr_value is not None:
+        pcr_col1, pcr_col2 = st.columns([1, 2])
+        with pcr_col1:
+            st.metric("Put/Call Ratio", f"{pcr_value:.3f}")
+            st.metric("Total Put Volume", f"{pcr_totals['put_vol']:,.0f}")
+            st.metric("Total Call Volume", f"{pcr_totals['call_vol']:,.0f}")
+            st.caption(f"Calculated for **{pcr_ticker}** using the nearest **{len(pcr_expirations)}** expirations.")
+        with pcr_col2:
+            pcr_fig = create_pcr_gauge(pcr_value)
+            st.plotly_chart(pcr_fig, use_container_width=True)
+    else:
+        st.warning("Could not retrieve Put/Call Ratio data.")
 
     st.divider()
 
