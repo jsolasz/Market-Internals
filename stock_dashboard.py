@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -553,7 +552,7 @@ def run_dashboard():
     """, height=30)
 
     # #################################################################################
-    # --- STAGE 1: Load and display essential, high-level market data (FAST) ---
+    # --- STAGE 1: Load all market data (constituents, ETFs, indices) ---
     # #################################################################################
     
     sp500_df = get_sp500_tickers()
@@ -562,18 +561,20 @@ def run_dashboard():
         return
         
     essential_tickers = ['SPY', 'RSP', '^GSPC', '^VIX', '^MOVE'] + list(SECTOR_ETF_MAP.values()) + list(FACTOR_ETF_MAP.values())
+    tickers = sp500_df['Symbol'].tolist()
+    all_tickers = list(set(tickers + essential_tickers))
     
-    with st.spinner('Loading essential market data (SPX, ETFs)...'):
-        daily_data_essentials, intraday_data_essentials = get_stock_data(list(set(essential_tickers)))
-        if daily_data_essentials.empty or intraday_data_essentials.empty:
-            st.warning("Could not load essential market data. Some components may be unavailable.")
+    with st.spinner('Loading all market data... This may take a moment.'):
+        daily_data, intraday_data = get_stock_data(all_tickers)
+        if daily_data.empty or intraday_data.empty:
+            st.warning("Could not load all market data. Some components may be unavailable.")
         
     st.header("S&P 500 (SPX) Performance")
-    spx_col = ('^GSPC', 'Close') if ('^GSPC', 'Close') in daily_data_essentials.columns else None
+    spx_col = ('^GSPC', 'Close') if ('^GSPC', 'Close') in daily_data.columns else None
     if spx_col is None:
         st.warning("Could not load S&P 500 index data for performance metrics.")
     else:
-        spx_data = daily_data_essentials[spx_col].dropna()
+        spx_data = daily_data[spx_col].dropna()
         
         # Updated periods to include Previous Qtr
         periods = {"1 Day": 1, "1 Week": 5, "MTD": None, "QTD": None, "Previous Qtr": None, "YTD": None}
@@ -640,7 +641,89 @@ def run_dashboard():
                             
             cols[i].metric(label=period_name, value=f"{change:.2f}%", delta_color="normal" if change >= 0 else "inverse")
     st.divider()
-    
+
+    # --- MOVED: Intraday Performance Section ---
+    st.header("Intraday Analysis")
+    # This section now runs earlier, using the globally loaded `daily_data` and `intraday_data`.
+    price_change = None
+    if not (intraday_data.empty or len(intraday_data) < 2):
+        try:
+            intraday_data.index = intraday_data.index.tz_convert('America/New_York')
+        except TypeError:
+            intraday_data.index = intraday_data.index.tz_localize('UTC').tz_convert('America/New_York')
+        
+        intraday_data = intraday_data.between_time('09:30', '16:00')
+        
+        valid_tickers_full = [t for t in tickers if (t, 'Close') in daily_data.columns and (t, 'Close') in intraday_data.columns]
+        
+        if valid_tickers_full:
+            last_close = daily_data.xs('Close', level=1, axis=1)[valid_tickers_full].iloc[-2]
+            current_price = intraday_data.xs('Close', level=1, axis=1)[valid_tickers_full].iloc[-1]
+            price_change = current_price - last_close
+        
+            spy_daily = daily_data['SPY'].dropna()
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.subheader("Intraday Performance")
+                spy_intra = (intraday_data[('SPY', 'Close')].pct_change().cumsum() * 100).fillna(0)
+                rsp_intra = (intraday_data[('RSP', 'Close')].pct_change().cumsum() * 100).fillna(0)
+                intraday_prices = intraday_data.xs('Close', level=1, axis=1)[valid_tickers_full].ffill()
+                adv_dec_line = (intraday_prices > last_close).sum(axis=1) - (intraday_prices < last_close).sum(axis=1)
+                fig_spy_rsp = go.Figure()
+                fig_spy_rsp.add_trace(go.Scatter(x=spy_intra.index.time, y=spy_intra, mode='lines', name='SPY (Market Cap Weighted)', line=dict(color='#636EFA')))
+                fig_spy_rsp.add_trace(go.Scatter(x=rsp_intra.index.time, y=rsp_intra, mode='lines', name='RSP (Equal Weighted)', line=dict(color='#FFA15A')))
+                fig_spy_rsp.update_layout(title_text='SPY vs. RSP Intraday', yaxis_title='% Change', legend=dict(x=0.01, y=0.99), plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white')
+                st.plotly_chart(fig_spy_rsp, use_container_width=True)
+                sub_col1, sub_col2 = st.columns(2)
+                with sub_col1:
+                    spy_intraday_full = intraday_data['SPY']
+                    typical_price = (spy_intraday_full['High'] + spy_intraday_full['Low'] + spy_intraday_full['Close']) / 3
+                    tp_volume = typical_price * spy_intraday_full['Volume']
+                    spy_intraday_full['VWAP'] = tp_volume.cumsum() / spy_intraday_full['Volume'].cumsum()
+                    spy_10d_sma_val = spy_daily['Close'].rolling(window=10).mean().iloc[-1]
+                    spy_20d_sma_val = spy_daily['Close'].rolling(window=20).mean().iloc[-1]
+                    fig_vwap = go.Figure()
+                    fig_vwap.add_trace(go.Scatter(x=spy_intraday_full.index.time, y=spy_intraday_full['Close'], mode='lines', name='SPY Price', line=dict(color='#636EFA')))
+                    fig_vwap.add_trace(go.Scatter(x=spy_intraday_full.index.time, y=spy_intraday_full['VWAP'], mode='lines', name='Intraday VWAP', line=dict(color='#FFA15A', dash='dash')))
+                    fig_vwap.add_hline(y=spy_10d_sma_val, line_width=1, line_dash="dash", line_color="cyan", annotation_text=f"10-d SMA: {spy_10d_sma_val:.2f}")
+                    fig_vwap.add_hline(y=spy_20d_sma_val, line_width=1, line_dash="dash", line_color="magenta", annotation_text=f"20-d SMA: {spy_20d_sma_val:.2f}")
+                    fig_vwap.update_layout(title='SPY Intraday Analysis', yaxis_title='Price', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99))
+                    st.plotly_chart(fig_vwap, use_container_width=True)
+                with sub_col2:
+                    spy_daily_monthly = spy_daily.tail(30).copy()
+                    spy_daily_monthly['SMA10'] = spy_daily_monthly['Close'].rolling(window=10).mean()
+                    spy_daily_monthly['SMA20'] = spy_daily_monthly['Close'].rolling(window=20).mean()
+                    fig_daily_spy = go.Figure()
+                    fig_daily_spy.add_trace(go.Candlestick(x=spy_daily_monthly.index, open=spy_daily_monthly['Open'], high=spy_daily_monthly['High'], low=spy_daily_monthly['Low'], close=spy_daily_monthly['Close'], name='SPY Daily'))
+                    fig_daily_spy.add_trace(go.Scatter(x=spy_daily_monthly.index, y=spy_daily_monthly['SMA10'], mode='lines', name='10-Day SMA', line=dict(color='cyan', width=1)))
+                    fig_daily_spy.add_trace(go.Scatter(x=spy_daily_monthly.index, y=spy_daily_monthly['SMA20'], mode='lines', name='20-Day SMA', line=dict(color='magenta', width=1)))
+                    fig_daily_spy.update_layout(title='Last 30 Days', yaxis_title='Price', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), margin=dict(l=20, r=20, t=40, b=20), xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig_daily_spy, use_container_width=True)
+            with col2:
+                st.subheader("% Stocks Above MA")
+                close_prices = daily_data.xs('Close', level=1, axis=1)[valid_tickers_full]
+                ma_periods = [10, 20, 50, 200]
+                for ma in ma_periods:
+                    if len(close_prices) >= ma:
+                        sma = close_prices.rolling(window=ma).mean().iloc[-1]
+                        above_ma = (close_prices.iloc[-1] > sma).sum()
+                        below_ma = len(valid_tickers_full) - above_ma
+                        metric_col, chart_col = st.columns([1, 1])
+                        with metric_col:
+                            st.metric(label=f"{ma}-Day MA", value=f"{above_ma / len(valid_tickers_full) * 100:.1f}%")
+                        with chart_col:
+                            fig_pie = go.Figure(data=[go.Pie(labels=['Above', 'Below'], values=[above_ma, below_ma], marker_colors=['#10b981', '#ef4444'], hole=.4, textinfo='none')])
+                            fig_pie.update_layout(showlegend=False, margin=dict(l=0, r=0, t=0, b=0), height=80, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                            st.plotly_chart(fig_pie, use_container_width=True, key=f"ma_pie_{ma}")
+                
+                st.subheader("A/D Line (Intraday)")
+                fig_adv_dec = go.Figure()
+                fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line, mode='lines', name='Net A/D', line=dict(color='white')))
+                fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line.where(adv_dec_line >= 0), fill='tozeroy', mode='none', fillcolor='rgba(16, 185, 129, 0.5)'))
+                fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line.where(adv_dec_line <= 0), fill='tozeroy', mode='none', fillcolor='rgba(239, 68, 68, 0.5)'))
+                fig_adv_dec.update_layout(title='Advancing - Declining Stocks (Net)', yaxis_range=[-505, 505], yaxis_title='Net Advancing Stocks', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', showlegend=False)
+                st.plotly_chart(fig_adv_dec, use_container_width=True)
+    st.divider()
 
     # --- NEW: PCR Section ---
     st.header("SPX Put/Call Ratio")
@@ -705,7 +788,7 @@ def run_dashboard():
         ig_yield = fetch_fred_data(ig_yield_series, API_KEY)
         
         # Extract VIX and MOVE data from the already loaded essential data
-        yf_data = daily_data_essentials.xs('Close', level=1, axis=1) if not daily_data_essentials.empty else pd.DataFrame()
+        yf_data = daily_data.xs('Close', level=1, axis=1) if not daily_data.empty else pd.DataFrame()
         
         vol_combined_df = None
         if (hyg_yield is not None and not hyg_yield.empty and 
@@ -807,48 +890,34 @@ def run_dashboard():
     st.divider()
     # --- END: Integrated code block from Vol.py ---
     st.header("Sector Analysis")
-    sec_fig_d, sec_fig_1m, sec_fig_ytd = create_relative_performance_charts(daily_data_essentials, intraday_data_essentials, SECTOR_ETF_MAP)
+    sec_fig_d, sec_fig_1m, sec_fig_ytd = create_relative_performance_charts(daily_data, intraday_data, SECTOR_ETF_MAP)
     c1, c2, c3 = st.columns(3)
     with c1: st.plotly_chart(sec_fig_d, use_container_width=True)
     with c2: st.plotly_chart(sec_fig_1m, use_container_width=True)
     with c3: st.plotly_chart(sec_fig_ytd, use_container_width=True)
     
-    sector_scatter_fig = create_performance_scatter_plot(daily_data_essentials.xs('Close', level=1, axis=1), SECTOR_ETF_MAP)
+    sector_scatter_fig = create_performance_scatter_plot(daily_data.xs('Close', level=1, axis=1), SECTOR_ETF_MAP)
     st.plotly_chart(sector_scatter_fig, use_container_width=True)
 
     st.divider()
     st.header("Factor Analysis")
-    fac_fig_d, fac_fig_1m, fac_fig_ytd = create_relative_performance_charts(daily_data_essentials, intraday_data_essentials, FACTOR_ETF_MAP)
+    fac_fig_d, fac_fig_1m, fac_fig_ytd = create_relative_performance_charts(daily_data, intraday_data, FACTOR_ETF_MAP)
     c1, c2, c3 = st.columns(3)
     with c1: st.plotly_chart(fac_fig_d, use_container_width=True)
     with c2: st.plotly_chart(fac_fig_1m, use_container_width=True)
     with c3: st.plotly_chart(fac_fig_ytd, use_container_width=True)
     
-    factor_scatter_fig = create_performance_scatter_plot(daily_data_essentials.xs('Close', level=1, axis=1), FACTOR_ETF_MAP)
+    factor_scatter_fig = create_performance_scatter_plot(daily_data.xs('Close', level=1, axis=1), FACTOR_ETF_MAP)
     st.plotly_chart(factor_scatter_fig, use_container_width=True)
     
     st.divider()
 
     # #################################################################################
-    # --- STAGE 2: Load and display full S&P 500 constituent data (SLOWER) ---
+    # --- STAGE 2: Render detailed S&P 500 components (data already loaded) ---
     # #################################################################################
-    
-    details_placeholder = st.empty()
-    with details_placeholder.container():
-        st.info("Loading detailed S&P 500 constituent data... This may take a minute.")
-        st.spinner("Fetching data for ~500 stocks and calculating market caps...")
-
-    tickers = sp500_df['Symbol'].tolist()
-    daily_data, intraday_data = get_stock_data(list(set(tickers + essential_tickers)))
     
     valid_daily_tickers = [t for t in tickers if (t, 'Close') in daily_data.columns]
     market_caps_info = get_market_caps(valid_daily_tickers)
-    
-    details_placeholder.empty()
-
-    # --- Render the rest of the dashboard using the FULL dataset ---
-    
-
     
     st.header("S&P 500 Volume Analysis")
     valid_tickers_daily = [t for t in tickers if (t, 'Volume') in daily_data.columns]
@@ -877,21 +946,12 @@ def run_dashboard():
     vol_cols[2].metric("Avg Volume (Up Days)", format_volume(up_days_volume))
     vol_cols[3].metric("Avg Volume (Down Days)", format_volume(down_days_volume))
     
-    price_change = None
     perf_df = pd.DataFrame() # Initialize perf_df
     
-    if not (intraday_data.empty or len(intraday_data) < 2):
-        try:
-            intraday_data.index = intraday_data.index.tz_convert('America/New_York')
-        except TypeError:
-            intraday_data.index = intraday_data.index.tz_localize('UTC').tz_convert('America/New_York')
-        
-        intraday_data = intraday_data.between_time('09:30', '16:00')
-        
+    if price_change is not None:
         valid_tickers_full = [t for t in tickers if (t, 'Close') in daily_data.columns and (t, 'Close') in intraday_data.columns]
         last_close = daily_data.xs('Close', level=1, axis=1)[valid_tickers_full].iloc[-2]
-        current_price = intraday_data.xs('Close', level=1, axis=1)[valid_tickers_full].iloc[-1]
-        price_change = current_price - last_close
+        
         advancing = (price_change > 0).sum()
         declining = (price_change < 0).sum()
         intraday_volumes = intraday_data.xs('Volume', level=1, axis=1)[valid_tickers_full]
@@ -970,69 +1030,6 @@ def run_dashboard():
 
         st.divider()
 
-        spy_daily = daily_data['SPY'].dropna()
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.subheader("Intraday Performance")
-            spy_intra = (intraday_data[('SPY', 'Close')].pct_change().cumsum() * 100).fillna(0)
-            rsp_intra = (intraday_data[('RSP', 'Close')].pct_change().cumsum() * 100).fillna(0)
-            intraday_prices = intraday_data.xs('Close', level=1, axis=1)[valid_tickers_full].ffill()
-            adv_dec_line = (intraday_prices > last_close).sum(axis=1) - (intraday_prices < last_close).sum(axis=1)
-            fig_spy_rsp = go.Figure()
-            fig_spy_rsp.add_trace(go.Scatter(x=spy_intra.index.time, y=spy_intra, mode='lines', name='SPY (Market Cap Weighted)', line=dict(color='#636EFA')))
-            fig_spy_rsp.add_trace(go.Scatter(x=rsp_intra.index.time, y=rsp_intra, mode='lines', name='RSP (Equal Weighted)', line=dict(color='#FFA15A')))
-            fig_spy_rsp.update_layout(title_text='SPY vs. RSP Intraday', yaxis_title='% Change', legend=dict(x=0.01, y=0.99), plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white')
-            st.plotly_chart(fig_spy_rsp, use_container_width=True)
-            sub_col1, sub_col2 = st.columns(2)
-            with sub_col1:
-                spy_intraday_full = intraday_data['SPY']
-                typical_price = (spy_intraday_full['High'] + spy_intraday_full['Low'] + spy_intraday_full['Close']) / 3
-                tp_volume = typical_price * spy_intraday_full['Volume']
-                spy_intraday_full['VWAP'] = tp_volume.cumsum() / spy_intraday_full['Volume'].cumsum()
-                spy_10d_sma_val = spy_daily['Close'].rolling(window=10).mean().iloc[-1]
-                spy_20d_sma_val = spy_daily['Close'].rolling(window=20).mean().iloc[-1]
-                fig_vwap = go.Figure()
-                fig_vwap.add_trace(go.Scatter(x=spy_intraday_full.index.time, y=spy_intraday_full['Close'], mode='lines', name='SPY Price', line=dict(color='#636EFA')))
-                fig_vwap.add_trace(go.Scatter(x=spy_intraday_full.index.time, y=spy_intraday_full['VWAP'], mode='lines', name='Intraday VWAP', line=dict(color='#FFA15A', dash='dash')))
-                fig_vwap.add_hline(y=spy_10d_sma_val, line_width=1, line_dash="dash", line_color="cyan", annotation_text=f"10-d SMA: {spy_10d_sma_val:.2f}")
-                fig_vwap.add_hline(y=spy_20d_sma_val, line_width=1, line_dash="dash", line_color="magenta", annotation_text=f"20-d SMA: {spy_20d_sma_val:.2f}")
-                fig_vwap.update_layout(title='SPY Intraday Analysis', yaxis_title='Price', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99))
-                st.plotly_chart(fig_vwap, use_container_width=True)
-            with sub_col2:
-                spy_daily_monthly = spy_daily.tail(30).copy()
-                spy_daily_monthly['SMA10'] = spy_daily_monthly['Close'].rolling(window=10).mean()
-                spy_daily_monthly['SMA20'] = spy_daily_monthly['Close'].rolling(window=20).mean()
-                fig_daily_spy = go.Figure()
-                fig_daily_spy.add_trace(go.Candlestick(x=spy_daily_monthly.index, open=spy_daily_monthly['Open'], high=spy_daily_monthly['High'], low=spy_daily_monthly['Low'], close=spy_daily_monthly['Close'], name='SPY Daily'))
-                fig_daily_spy.add_trace(go.Scatter(x=spy_daily_monthly.index, y=spy_daily_monthly['SMA10'], mode='lines', name='10-Day SMA', line=dict(color='cyan', width=1)))
-                fig_daily_spy.add_trace(go.Scatter(x=spy_daily_monthly.index, y=spy_daily_monthly['SMA20'], mode='lines', name='20-Day SMA', line=dict(color='magenta', width=1)))
-                fig_daily_spy.update_layout(title='Last 30 Days', yaxis_title='Price', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), margin=dict(l=20, r=20, t=40, b=20), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig_daily_spy, use_container_width=True)
-        with col2:
-            st.subheader("% Stocks Above MA")
-            close_prices = daily_data.xs('Close', level=1, axis=1)[valid_tickers_full]
-            ma_periods = [10, 20, 50, 200]
-            for ma in ma_periods:
-                if len(close_prices) >= ma:
-                    sma = close_prices.rolling(window=ma).mean().iloc[-1]
-                    above_ma = (close_prices.iloc[-1] > sma).sum()
-                    below_ma = len(valid_tickers_full) - above_ma
-                    metric_col, chart_col = st.columns([1, 1])
-                    with metric_col:
-                        st.metric(label=f"{ma}-Day MA", value=f"{above_ma / len(valid_tickers_full) * 100:.1f}%")
-                    with chart_col:
-                        fig_pie = go.Figure(data=[go.Pie(labels=['Above', 'Below'], values=[above_ma, below_ma], marker_colors=['#10b981', '#ef4444'], hole=.4, textinfo='none')])
-                        fig_pie.update_layout(showlegend=False, margin=dict(l=0, r=0, t=0, b=0), height=80, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                        st.plotly_chart(fig_pie, use_container_width=True, key=f"ma_pie_{ma}")
-            
-            st.subheader("A/D Line (Intraday)")
-            fig_adv_dec = go.Figure()
-            fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line, mode='lines', name='Net A/D', line=dict(color='white')))
-            fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line.where(adv_dec_line >= 0), fill='tozeroy', mode='none', fillcolor='rgba(16, 185, 129, 0.5)'))
-            fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line.where(adv_dec_line <= 0), fill='tozeroy', mode='none', fillcolor='rgba(239, 68, 68, 0.5)'))
-            fig_adv_dec.update_layout(title='Advancing - Declining Stocks (Net)', yaxis_range=[-505, 505], yaxis_title='Net Advancing Stocks', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', showlegend=False)
-            st.plotly_chart(fig_adv_dec, use_container_width=True)
-        st.divider()
 
     if price_change is not None and not perf_df.empty:
         st.subheader("S&P 500 Daily Return Distribution")
