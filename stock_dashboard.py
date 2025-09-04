@@ -1,12 +1,10 @@
-
-
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import requests
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import os, json, time, pathlib, warnings
 import numpy as np
 import streamlit.components.v1 as components
@@ -34,6 +32,7 @@ TICKERS_TTL_HOURS = 6      # Cache S&P list for 6 hours
 CACHE_DIR = ".dashboard_cache"    # Local cache folder
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+API_KEY = "bbd385ee9e25ebfb9e511f80c37e0aaa" # Added from Vol.py
 SECTOR_ETF_MAP = {
     'Information Technology': 'XLK',
     'Health Care': 'XLV',
@@ -176,7 +175,6 @@ def get_market_caps(tickers):
     _save_cached_market_caps(market_caps_info)
     return market_caps_info
 
-
 @st.cache_data(ttl=600)
 def get_stock_data(tickers):
     """Fetches historical and intraday data for a list of tickers."""
@@ -184,6 +182,36 @@ def get_stock_data(tickers):
     data_daily = yf.download(ticker_str, period="1y", interval="1d", group_by='ticker', auto_adjust=True, progress=False)
     data_intraday = yf.download(ticker_str, period="1d", interval="5m", group_by='ticker', auto_adjust=True, progress=False)
     return data_daily, data_intraday
+
+# --- START: Function added from Vol.py ---
+@st.cache_data(ttl=3600)
+def fetch_fred_data(series_id, api_key):
+    """Fetches a single data series from FRED."""
+    if not api_key:
+        return None
+    BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
+    url = f"{BASE_URL}?series_id={series_id}&api_key={api_key}&file_type=json"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        observations = data.get("observations", [])
+        
+        if not observations:
+            st.warning(f"No data returned from FRED for series {series_id}. Check the series ID and your API key.")
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(observations)
+        df["date"] = pd.to_datetime(df["date"])
+        df["value"] = pd.to_numeric(df["value"], errors='coerce')
+        return df[["date", "value"]].set_index("date")
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to fetch FRED data for {series_id}: {e}")
+        return None
+    except Exception as e:
+        st.error(f"An error occurred while processing FRED data for {series_id}: {e}")
+        return None
+# --- END: Function added from Vol.py ---
 
 # --- NEW: PCR Data Fetching Function (from pcr.py) ---
 @st.cache_data(ttl=600)
@@ -532,7 +560,7 @@ def run_dashboard():
         st.error("Failed to retrieve S&P 500 ticker list. Dashboard cannot be loaded.")
         return
         
-    essential_tickers = ['SPY', 'RSP', '^GSPC', '^VIX'] + list(SECTOR_ETF_MAP.values()) + list(FACTOR_ETF_MAP.values())
+    essential_tickers = ['SPY', 'RSP', '^GSPC', '^VIX', '^MOVE'] + list(SECTOR_ETF_MAP.values()) + list(FACTOR_ETF_MAP.values())
     
     with st.spinner('Loading essential market data (SPX, ETFs)...'):
         daily_data_essentials, intraday_data_essentials = get_stock_data(list(set(essential_tickers)))
@@ -611,6 +639,7 @@ def run_dashboard():
                             
             cols[i].metric(label=period_name, value=f"{change:.2f}%", delta_color="normal" if change >= 0 else "inverse")
     st.divider()
+    
 
     # --- NEW: PCR Section ---
     st.header("SPX Put/Call Ratio")
@@ -664,6 +693,118 @@ def run_dashboard():
     
     st.divider()
 
+    # --- START: Integrated code block from Vol.py ---
+    st.header("Volatility & Credit Spreads")
+
+    # --- Load and Process Data ---
+    with st.spinner('Loading Volatility & Credit Spread data...'):
+        hyg_yield_series = "BAMLH0A0HYM2EY"
+        ig_yield_series = "BAMLC0A4CBBBEY"
+        hyg_yield = fetch_fred_data(hyg_yield_series, API_KEY)
+        ig_yield = fetch_fred_data(ig_yield_series, API_KEY)
+        
+        # Extract VIX and MOVE data from the already loaded essential data
+        yf_data = daily_data_essentials.xs('Close', level=1, axis=1) if not daily_data_essentials.empty else pd.DataFrame()
+        
+        vol_combined_df = None
+        if (hyg_yield is not None and not hyg_yield.empty and 
+            ig_yield is not None and not ig_yield.empty and 
+            yf_data is not None and not yf_data.empty and
+            '^VIX' in yf_data.columns and '^MOVE' in yf_data.columns):
+            
+            credit_spreads_df = hyg_yield.rename(columns={"value": "HYG_Yield"}).join(
+                ig_yield.rename(columns={"value": "IG_Yield"}), how="inner"
+            )
+            credit_spreads_df["Spread"] = credit_spreads_df["HYG_Yield"] - credit_spreads_df["IG_Yield"]
+            
+            # Filter to last 12 months
+            end_date = date.today()
+            start_date = end_date - timedelta(days=365)
+            credit_spreads_df = credit_spreads_df[credit_spreads_df.index >= pd.to_datetime(start_date)]
+            
+            vol_combined_df = credit_spreads_df[['Spread']].join(yf_data[['^VIX', '^MOVE']], how='inner').ffill().dropna()
+            vol_combined_df.rename(columns={'^VIX': 'VIX', '^MOVE': 'MOVE'}, inplace=True)
+
+    # --- Key Metrics Display ---
+    st.subheader("Key Performance Indicators")
+    if vol_combined_df is not None and len(vol_combined_df) > 22:
+        col1, col2, col3 = st.columns(3)
+        
+        # --- VIX Metrics ---
+        with col1:
+            latest_vix = vol_combined_df['VIX'].iloc[-1]
+            dod_vix_change = latest_vix - vol_combined_df['VIX'].iloc[-2]
+            dod_vix_pct = (dod_vix_change / vol_combined_df['VIX'].iloc[-2]) * 100
+            wow_vix_change = latest_vix - vol_combined_df['VIX'].iloc[-6]
+            wow_vix_pct = (wow_vix_change / vol_combined_df['VIX'].iloc[-6]) * 100
+            mom_vix_change = latest_vix - vol_combined_df['VIX'].iloc[-22]
+            mom_vix_pct = (mom_vix_change / vol_combined_df['VIX'].iloc[-22]) * 100
+            
+            st.metric(label="VIX Index", value=f"{latest_vix:.2f}")
+            st.markdown(f"**DoD:** <span style='color: {'red' if dod_vix_change > 0 else 'green'};'>{dod_vix_change:+.2f} ({dod_vix_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            st.markdown(f"**WoW:** <span style='color: {'red' if wow_vix_change > 0 else 'green'};'>{wow_vix_change:+.2f} ({wow_vix_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            st.markdown(f"**MoM:** <span style='color: {'red' if mom_vix_change > 0 else 'green'};'>{mom_vix_change:+.2f} ({mom_vix_pct:+.2f}%)</span>", unsafe_allow_html=True)
+
+        # --- MOVE Metrics ---
+        with col2:
+            latest_move = vol_combined_df['MOVE'].iloc[-1]
+            dod_move_change = latest_move - vol_combined_df['MOVE'].iloc[-2]
+            dod_move_pct = (dod_move_change / vol_combined_df['MOVE'].iloc[-2]) * 100
+            wow_move_change = latest_move - vol_combined_df['MOVE'].iloc[-6]
+            wow_move_pct = (wow_move_change / vol_combined_df['MOVE'].iloc[-6]) * 100
+            mom_move_change = latest_move - vol_combined_df['MOVE'].iloc[-22]
+            mom_move_pct = (mom_move_change / vol_combined_df['MOVE'].iloc[-22]) * 100
+
+            st.metric(label="MOVE Index", value=f"{latest_move:.2f}")
+            st.markdown(f"**DoD:** <span style='color: {'red' if dod_move_change > 0 else 'green'};'>{dod_move_change:+.2f} ({dod_move_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            st.markdown(f"**WoW:** <span style='color: {'red' if wow_move_change > 0 else 'green'};'>{wow_move_change:+.2f} ({wow_move_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            st.markdown(f"**MoM:** <span style='color: {'red' if mom_move_change > 0 else 'green'};'>{mom_move_change:+.2f} ({mom_move_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            
+        # --- Spread Metrics ---
+        with col3:
+            latest_spread = vol_combined_df['Spread'].iloc[-1]
+            dod_spread_change = latest_spread - vol_combined_df['Spread'].iloc[-2]
+            dod_spread_pct = (dod_spread_change / vol_combined_df['Spread'].iloc[-2]) * 100
+            wow_spread_change = latest_spread - vol_combined_df['Spread'].iloc[-6]
+            wow_spread_pct = (wow_spread_change / vol_combined_df['Spread'].iloc[-6]) * 100
+            mom_spread_change = latest_spread - vol_combined_df['Spread'].iloc[-22]
+            mom_spread_pct = (mom_spread_change / vol_combined_df['Spread'].iloc[-22]) * 100
+            
+            st.metric(label="HY-IG Spread (bps)", value=f"{latest_spread:.2f}")
+            st.markdown(f"**DoD:** <span style='color: {'red' if dod_spread_change > 0 else 'green'};'>{dod_spread_change:+.2f} ({dod_spread_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            st.markdown(f"**WoW:** <span style='color: {'red' if wow_spread_change > 0 else 'green'};'>{wow_spread_change:+.2f} ({wow_spread_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            st.markdown(f"**MoM:** <span style='color: {'red' if mom_spread_change > 0 else 'green'};'>{mom_spread_change:+.2f} ({mom_spread_pct:+.2f}%)</span>", unsafe_allow_html=True)
+    else:
+        st.info("Loading data for Key Performance Indicators...")
+
+    # --- Main Chart ---
+    st.subheader("Normalized 12-Month Performance")
+    if vol_combined_df is not None:
+        # --- Normalization ---
+        normalized_df = (vol_combined_df / vol_combined_df.iloc[0] - 1) * 100
+
+        fig_vol = go.Figure()
+        fig_vol.add_trace(go.Scatter(x=normalized_df.index, y=normalized_df['Spread'], name='HY-IG Credit Spread (% Change)', line=dict(color='red')))
+        fig_vol.add_trace(go.Scatter(x=normalized_df.index, y=normalized_df['VIX'], name='VIX Index (% Change)', line=dict(color='blue')))
+        fig_vol.add_trace(go.Scatter(x=normalized_df.index, y=normalized_df['MOVE'], name='MOVE Index (% Change)', line=dict(color='green', dash='dot')))
+        
+        fig_vol.update_layout(
+            title_text="Normalized Performance: Credit Spread, VIX, and MOVE Index",
+            template='plotly_white',
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white'
+        )
+        fig_vol.update_yaxes(title_text="<b>% Change</b>", color='white', gridcolor='rgba(255, 255, 255, 0.1)')
+        fig_vol.update_xaxes(color='white', gridcolor='rgba(255, 255, 255, 0.1)')
+
+
+        st.plotly_chart(fig_vol, use_container_width=True)
+    else:
+        st.warning("Could not load all required data for the Volatility & Spreads chart. Please check your connection or the data sources.")
+
+    st.divider()
+    # --- END: Integrated code block from Vol.py ---
     st.header("Sector Analysis")
     sec_fig_d, sec_fig_1m, sec_fig_ytd = create_relative_performance_charts(daily_data_essentials, intraday_data_essentials, SECTOR_ETF_MAP)
     c1, c2, c3 = st.columns(3)
