@@ -550,6 +550,11 @@ def run_dashboard():
             updateClock(); // Run immediately
         </script>
     """, height=30)
+    
+    # --- NEW: Initialize session state for PCR history ---
+    if 'pcr_history' not in st.session_state:
+        st.session_state.pcr_history = pd.DataFrame(columns=['timestamp', 'pcr'])
+
 
     # #################################################################################
     # --- STAGE 1: Load and display essential, high-level market data (FAST) ---
@@ -641,12 +646,18 @@ def run_dashboard():
     st.divider()
     
 
-    # --- NEW: PCR Section ---
+    # --- MODIFIED: PCR Section with History Tracking ---
     st.header("SPX Put/Call Ratio")
     with st.spinner("Loading Put/Call Ratio data..."):
         pcr_ticker, pcr_value, pcr_totals, pcr_expirations = get_pcr_data(n_expirations=20)
     
     if pcr_value is not None:
+        # --- NEW: Append current PCR data to session state history ---
+        new_record = pd.DataFrame([{'timestamp': datetime.now(), 'pcr': pcr_value}])
+        st.session_state.pcr_history = pd.concat([st.session_state.pcr_history, new_record], ignore_index=True)
+        # Drop duplicates in case of rapid refreshes with no data change
+        st.session_state.pcr_history.drop_duplicates(subset=['timestamp'], keep='last', inplace=True)
+
         pcr_col1, pcr_col2 = st.columns([1, 2])
         with pcr_col1:
             st.metric("Put/Call Ratio", f"{pcr_value:.3f}")
@@ -656,6 +667,28 @@ def run_dashboard():
         with pcr_col2:
             pcr_fig = create_pcr_gauge(pcr_value)
             st.plotly_chart(pcr_fig, use_container_width=True)
+
+        # --- NEW: Display the intraday history chart ---
+        if not st.session_state.pcr_history.empty and len(st.session_state.pcr_history) > 1:
+            st.subheader("Intraday PCR History")
+            fig_pcr_history = px.line(
+                st.session_state.pcr_history,
+                x='timestamp',
+                y='pcr',
+                title="PCR Value per Refresh",
+                markers=True
+            )
+            fig_pcr_history.update_layout(
+                plot_bgcolor='#0E1117',
+                paper_bgcolor='#0E1117',
+                font_color='white',
+                xaxis_title="Time",
+                yaxis_title="Put/Call Ratio",
+                xaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'),
+                yaxis=dict(gridcolor='rgba(255, 255, 255, 0.1)'),
+            )
+            st.plotly_chart(fig_pcr_history, use_container_width=True)
+
     else:
         st.warning("Could not retrieve Put/Call Ratio data.")
 
