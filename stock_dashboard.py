@@ -752,7 +752,7 @@ def run_dashboard():
             
             # Filter to last 12 months
             end_date = date.today()
-            start_date = end_date - timedelta(days=365)
+            start_date = end_date - timedelta(days=180)
             credit_spreads_df = credit_spreads_df[credit_spreads_df.index >= pd.to_datetime(start_date)]
             
             vol_combined_df = credit_spreads_df[['Spread']].join(yf_data[['^VIX', '^MOVE']], how='inner').ffill().dropna()
