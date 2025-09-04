@@ -811,7 +811,7 @@ def run_dashboard():
         st.info("Loading data for Key Performance Indicators...")
 
     # --- Main Chart ---
-    st.subheader("Normalized 12-Month Performance")
+    st.subheader("Normalized 6-Month Performance")
     if vol_combined_df is not None:
         # --- Normalization ---
         normalized_df = (vol_combined_df / vol_combined_df.iloc[0] - 1) * 100
