@@ -847,10 +847,7 @@ def run_dashboard():
 
     # --- Render the rest of the dashboard using the FULL dataset ---
     
-    st.header("S&P 500 Constituent Momentum")
-    sp500_scatter_fig = create_sp500_scatter_plot(daily_data.xs('Close', level=1, axis=1), sp500_df, market_caps_info)
-    st.plotly_chart(sp500_scatter_fig, use_container_width=True)
-    st.divider()
+
     
     st.header("S&P 500 Volume Analysis")
     valid_tickers_daily = [t for t in tickers if (t, 'Volume') in daily_data.columns]
@@ -1061,7 +1058,11 @@ def run_dashboard():
             fig_dist.update_layout(title="Equal-Weighted vs. Cap-Weighted Return Distribution", xaxis_title="Individual Stock Daily Return (%)", yaxis_title="Density (Scaled)", plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), height=600, yaxis_range=[0, 1.2])
             st.plotly_chart(fig_dist, use_container_width=True)
         st.divider()
-        st.subheader("Daily Movers & Shakers")
+        st.header("S&P 500 Constituent Momentum")
+        sp500_scatter_fig = create_sp500_scatter_plot(daily_data.xs('Close', level=1, axis=1), sp500_df, market_caps_info)
+        st.plotly_chart(sp500_scatter_fig, use_container_width=True)
+        st.divider()
+        st.subheader("Daily Movers")
         col1, col2 = st.columns(2)
         if 'perf_df' in locals() and not perf_df.empty:
             def format_movers_table(df, title, daily_data_df, current_prices_series):
