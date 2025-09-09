@@ -57,9 +57,6 @@ FACTOR_ETF_MAP = {
     "Speculative Tech": "ARKK",
     "High Beta": "SPHB",
 }
-# Constants for PCR calculation
-PCR_INDEX_TICKERS = ["^SPX", "SPX", "^GSPC"]
-PCR_FALLBACK_TICKER = "SPY"
 
 
 # --- Custom CSS for Theming ---
@@ -213,55 +210,6 @@ def fetch_fred_data(series_id, api_key):
         return None
 # --- END: Function added from Vol.py ---
 
-# --- NEW: PCR Data Fetching Function (from pcr.py) ---
-@st.cache_data(ttl=600)
-def get_pcr_data(n_expirations: int = 20):
-    """
-    Finds a working ticker, gets expirations, and calculates the PCR metrics.
-    Caches the result for 10 minutes.
-    """
-    # 1. Find a working ticker
-    ticker = PCR_FALLBACK_TICKER # Start with fallback
-    for tkr in PCR_INDEX_TICKERS:
-        try:
-            if yf.Ticker(tkr).options:
-                ticker = tkr
-                break
-        except Exception:
-            continue
-
-    # 2. Get the nearest N expirations
-    all_expirations = yf.Ticker(ticker).options or []
-    expirations_to_use = all_expirations[:n_expirations]
-    if not expirations_to_use:
-        return None, None, None, "No expirations found."
-
-    # 3. Aggregate metrics across expirations
-    totals = {"call_vol": 0.0, "put_vol": 0.0}
-    for e in expirations_to_use:
-        try:
-            opt = yf.Ticker(ticker).option_chain(e)
-            calls = opt.calls.copy()
-            puts  = opt.puts.copy()
-
-            # Ensure volume column exists and is numeric
-            for df in (calls, puts):
-                if "volume" not in df.columns: df["volume"] = 0
-                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
-
-            totals["call_vol"] += float(calls["volume"].sum())
-            totals["put_vol"]  += float(puts["volume"].sum())
-        except Exception:
-            # Skip expiration if it fails to load
-            continue
-    
-    # 4. Calculate PCR
-    denom = totals["call_vol"]
-    num   = totals["put_vol"]
-    pcr = (num / denom) if denom > 0 else (float("inf") if num > 0 else 0.0)
-    
-    return ticker, pcr, totals, expirations_to_use
-
 @st.cache_data(ttl=3600*6)
 def get_seasonality_data():
     """Fetches and calculates SPX seasonality for the last 50 years."""
@@ -337,39 +285,6 @@ def build_distribution(vals, wts, grid, bw=0.60):
 
 # --- REFACTORED/REUSABLE ANALYSIS FUNCTIONS ---
 
-def create_pcr_gauge(pcr_value):
-    """Creates a Plotly gauge chart for the Put/Call Ratio."""
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = pcr_value,
-        title = {'text': "Put/Call Ratio (Volume)"},
-        gauge = {
-            'axis': {'range': [0, 2], 'tickwidth': 1, 'tickcolor': "darkblue"},
-            'bar': {'color': "#0E1117"},
-            'bgcolor': "white",
-            'borderwidth': 2,
-            'bordercolor': "gray",
-            'steps': [
-                {'range': [0, 1], 'color': 'rgba(16, 185, 129, 0.7)'}, # Bullish
-                {'range': [1, 1.25], 'color': 'rgba(245, 158, 11, 0.6)'}, # Neutral
-                {'range': [1.25, 2.0], 'color': 'rgba(239, 68, 68, 0.7)'}  # Bearish
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 1.5
-            }
-        }
-    ))
-    fig.update_layout(
-        paper_bgcolor='#0E1117',
-        font={'color': 'white'},
-        height=300,
-        # Increased top margin from 40 to 80 to prevent title cutoff
-        margin=dict(l=20, r=20, t=80, b=20)
-    )
-    return fig
-
 def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
     map_tickers = list(ticker_map.values())
     if daily_data.empty: 
@@ -437,6 +352,7 @@ def create_relative_performance_charts(daily_data, intraday_data, ticker_map):
         return fig
 
     return create_bar_fig(relative_perf_daily_df, "vs. SPY (Today)"), create_bar_fig(relative_perf_1m_df, "vs. SPY (Last 21 Days)"), create_bar_fig(relative_perf_ytd_df, "vs. SPY (Year-to-Date)")
+
 def create_performance_scatter_plot(daily_closes, ticker_map):
     today = pd.Timestamp.now()
     current_q_start = today - pd.tseries.offsets.QuarterBegin(startingMonth=1)
@@ -569,6 +485,10 @@ def run_dashboard():
         if daily_data.empty or intraday_data.empty:
             st.warning("Could not load all market data. Some components may be unavailable.")
         
+        # MOVED: Fetch market cap data early so it's available for movers calculation
+        valid_daily_tickers = [t for t in tickers if (t, 'Close') in daily_data.columns]
+        market_caps_info = get_market_caps(valid_daily_tickers)
+        
     st.header("S&P 500 (SPX) Performance")
     spx_col = ('^GSPC', 'Close') if ('^GSPC', 'Close') in daily_data.columns else None
     if spx_col is None:
@@ -646,6 +566,8 @@ def run_dashboard():
     st.header("Intraday Analysis")
     # This section now runs earlier, using the globally loaded `daily_data` and `intraday_data`.
     price_change = None
+    perf_df = pd.DataFrame() # Initialize perf_df to be used by movers and distribution plots
+
     if not (intraday_data.empty or len(intraday_data) < 2):
         try:
             intraday_data.index = intraday_data.index.tz_convert('America/New_York')
@@ -723,6 +645,58 @@ def run_dashboard():
                 fig_adv_dec.add_trace(go.Scatter(x=adv_dec_line.index.time, y=adv_dec_line.where(adv_dec_line <= 0), fill='tozeroy', mode='none', fillcolor='rgba(239, 68, 68, 0.5)'))
                 fig_adv_dec.update_layout(title='Advancing - Declining Stocks (Net)', yaxis_range=[-505, 505], yaxis_title='Net Advancing Stocks', plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', showlegend=False)
                 st.plotly_chart(fig_adv_dec, use_container_width=True)
+
+            # --- MOVED: TOP CONTRIBUTORS / DETRACTORS SECTION ---
+            st.subheader("Top Index Movers (by Contribution)")
+            valid_caps = {t: market_caps_info[t]['marketCap'] for t in market_caps_info if 'marketCap' in market_caps_info.get(t, {})}
+            mcap_df = pd.DataFrame.from_dict(valid_caps, orient='index', columns=['Market Cap'])
+            # This calculation populates perf_df for later use in other charts
+            perf_df = pd.concat([(price_change / last_close * 100).rename('% Change'), mcap_df], axis=1).dropna()
+            
+            if not perf_df.empty:
+                total_market_cap = perf_df['Market Cap'].sum()
+                perf_df['Weight'] = perf_df['Market Cap'] / total_market_cap
+                perf_df['Contribution'] = perf_df['Weight'] * perf_df['% Change']
+                
+                top_contributors = perf_df.sort_values('Contribution', ascending=False).head(10)
+                top_detractors = perf_df.sort_values('Contribution', ascending=True).head(10)
+            
+                c1, c2 = st.columns(2)
+                with c1:
+                    fig = go.Figure(go.Bar(
+                        x=top_contributors['Contribution'],
+                        y=top_contributors.index,
+                        orientation='h',
+                        text=[f"{chg:.2f}%" for chg in top_contributors['% Change']],
+                        textposition='outside',
+                        marker_color='#10b981'
+                    ))
+                    fig.update_layout(
+                        title="Top Contributors",
+                        xaxis_title="Contribution to SPX Change (%)",
+                        yaxis=dict(autorange="reversed"),
+                        plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
+                        margin=dict(l=20, r=20, t=40, b=20), height=400
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                with c2:
+                    fig = go.Figure(go.Bar(
+                        x=top_detractors['Contribution'],
+                        y=top_detractors.index,
+                        orientation='h',
+                        text=[f"{chg:.2f}%" for chg in top_detractors['% Change']],
+                        textposition='outside',
+                        marker_color='#ef4444'
+                    ))
+                    fig.update_layout(
+                        title="Top Detractors",
+                        xaxis_title="Contribution to SPX Change (%)",
+                        yaxis=dict(autorange="reversed"),
+                        plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
+                         margin=dict(l=20, r=20, t=40, b=20), height=400
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
     st.divider()
 
     st.header("Seasonality Analysis")
@@ -756,55 +730,7 @@ def run_dashboard():
             st.plotly_chart(fig_vix_season, use_container_width=True)
     
     st.divider()
-    # --- NEW: TOP CONTRIBUTORS / DETRACTORS SECTION ---
-    st.subheader("Top Index Movers (by Contribution)")
-    valid_caps = {t: market_caps_info[t]['marketCap'] for t in market_caps_info if 'marketCap' in market_caps_info.get(t, {})}
-    mcap_df = pd.DataFrame.from_dict(valid_caps, orient='index', columns=['Market Cap'])
-    perf_df = pd.concat([(price_change / last_close * 100).rename('% Change'), mcap_df], axis=1).dropna()
-    
-    if not perf_df.empty:
-        total_market_cap = perf_df['Market Cap'].sum()
-        perf_df['Weight'] = perf_df['Market Cap'] / total_market_cap
-        perf_df['Contribution'] = perf_df['Weight'] * perf_df['% Change']
-        
-        top_contributors = perf_df.sort_values('Contribution', ascending=False).head(10)
-        top_detractors = perf_df.sort_values('Contribution', ascending=True).head(10)
-    
-        c1, c2 = st.columns(2)
-        with c1:
-            fig = go.Figure(go.Bar(
-                x=top_contributors['Contribution'],
-                y=top_contributors.index,
-                orientation='h',
-                text=[f"{chg:.2f}%" for chg in top_contributors['% Change']],
-                textposition='outside',
-                marker_color='#10b981'
-            ))
-            fig.update_layout(
-                title="Top Contributors",
-                xaxis_title="Contribution to SPX Change (%)",
-                yaxis=dict(autorange="reversed"),
-                plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
-                margin=dict(l=20, r=20, t=40, b=20), height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        with c2:
-            fig = go.Figure(go.Bar(
-                x=top_detractors['Contribution'],
-                y=top_detractors.index,
-                orientation='h',
-                text=[f"{chg:.2f}%" for chg in top_detractors['% Change']],
-                textposition='outside',
-                marker_color='#ef4444'
-            ))
-            fig.update_layout(
-                title="Top Detractors",
-                xaxis_title="Contribution to SPX Change (%)",
-                yaxis=dict(autorange="reversed"),
-                plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
-                 margin=dict(l=20, r=20, t=40, b=20), height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
+
     # --- START: Integrated code block from Vol.py ---
     st.header("Volatility & Credit Spreads")
 
@@ -945,9 +871,6 @@ def run_dashboard():
     # --- STAGE 2: Render detailed S&P 500 components (data already loaded) ---
     # #################################################################################
     
-    valid_daily_tickers = [t for t in tickers if (t, 'Close') in daily_data.columns]
-    market_caps_info = get_market_caps(valid_daily_tickers)
-    
     st.header("S&P 500 Volume Analysis")
     valid_tickers_daily = [t for t in tickers if (t, 'Volume') in daily_data.columns]
     total_daily_sp500_volume = daily_data.xs('Volume', level=1, axis=1)[valid_tickers_daily].sum(axis=1)
@@ -975,11 +898,8 @@ def run_dashboard():
     vol_cols[2].metric("Avg Volume (Up Days)", format_volume(up_days_volume))
     vol_cols[3].metric("Avg Volume (Down Days)", format_volume(down_days_volume))
     
-    perf_df = pd.DataFrame() # Initialize perf_df
-    
     if price_change is not None:
         valid_tickers_full = [t for t in tickers if (t, 'Close') in daily_data.columns and (t, 'Close') in intraday_data.columns]
-        last_close = daily_data.xs('Close', level=1, axis=1)[valid_tickers_full].iloc[-2]
         
         advancing = (price_change > 0).sum()
         declining = (price_change < 0).sum()
@@ -1010,30 +930,29 @@ def run_dashboard():
         st.divider()
 
 
-    if price_change is not None and not perf_df.empty:
+    # This check now works correctly because perf_df is calculated in the intraday block
+    if not perf_df.empty:
         st.subheader("S&P 500 Daily Return Distribution")
-        if perf_df.empty or perf_df['% Change'].isnull().all():
-            st.warning("Could not generate the return distribution chart. Data is incomplete.")
-        else:
-            w_cap = perf_df["Market Cap"].values / perf_df["Market Cap"].sum()
-            w_eq  = np.ones(len(perf_df)) / len(perf_df)
-            avg_e, ag_e, ad_e = weighted_stats(perf_df["% Change"].values, w_eq)
-            grid = np.linspace(perf_df['% Change'].quantile(0.01), perf_df['% Change'].quantile(0.99), 500)
-            den_eq  = build_distribution(perf_df["% Change"].values, w_eq,  grid, bw=0.6)
-            den_cap = build_distribution(perf_df["% Change"].values, w_cap, grid, bw=1.4)
-            den_eq  /= max(den_eq.max(), 1e-12)
-            den_cap /= max(den_cap.max(), 1e-12)
-            fig_dist = go.Figure()
-            fig_dist.add_trace(go.Scatter(x=grid, y=den_cap, mode='lines', line=dict(color='white', width=1, dash='dash'), name='Cap-Weighted'))
-            zero_idx = np.searchsorted(grid, 0.0)
-            fig_dist.add_trace(go.Scatter(x=grid[:zero_idx], y=den_eq[:zero_idx], fill='tozeroy', mode='none', fillcolor='rgba(239, 68, 68, 0.4)', name='Negative Returns'))
-            fig_dist.add_trace(go.Scatter(x=grid[zero_idx:], y=den_eq[zero_idx:], fill='tozeroy', mode='none', fillcolor='rgba(16, 185, 129, 0.4)', name='Positive Returns'))
-            fig_dist.add_trace(go.Scatter(x=grid, y=den_eq, mode='lines', line=dict(color='#f1c40f', width=2), name='Equal-Weighted'))
-            fig_dist.add_vline(x=avg_e, line_width=1, line_dash="dash", line_color="#f1c40f", annotation_text=f"Average: {avg_e:+.2f}%", annotation_position="top left")
-            if not pd.isna(ag_e): fig_dist.add_vline(x=ag_e, line_width=1, line_dash="dash", line_color="green", annotation_text=f"Avg Gain: {ag_e:+.2f}%", annotation_position="bottom right")
-            if not pd.isna(ad_e): fig_dist.add_vline(x=ad_e, line_width=1, line_dash="dash", line_color="red", annotation_text=f"Avg Decline: {ad_e:+.2f}%", annotation_position="bottom left")
-            fig_dist.update_layout(title="Equal-Weighted vs. Cap-Weighted Return Distribution", xaxis_title="Individual Stock Daily Return (%)", yaxis_title="Density (Scaled)", plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), height=600, yaxis_range=[0, 1.2])
-            st.plotly_chart(fig_dist, use_container_width=True)
+        
+        w_cap = perf_df["Market Cap"].values / perf_df["Market Cap"].sum()
+        w_eq  = np.ones(len(perf_df)) / len(perf_df)
+        avg_e, ag_e, ad_e = weighted_stats(perf_df["% Change"].values, w_eq)
+        grid = np.linspace(perf_df['% Change'].quantile(0.01), perf_df['% Change'].quantile(0.99), 500)
+        den_eq  = build_distribution(perf_df["% Change"].values, w_eq,  grid, bw=0.6)
+        den_cap = build_distribution(perf_df["% Change"].values, w_cap, grid, bw=1.4)
+        den_eq  /= max(den_eq.max(), 1e-12)
+        den_cap /= max(den_cap.max(), 1e-12)
+        fig_dist = go.Figure()
+        fig_dist.add_trace(go.Scatter(x=grid, y=den_cap, mode='lines', line=dict(color='white', width=1, dash='dash'), name='Cap-Weighted'))
+        zero_idx = np.searchsorted(grid, 0.0)
+        fig_dist.add_trace(go.Scatter(x=grid[:zero_idx], y=den_eq[:zero_idx], fill='tozeroy', mode='none', fillcolor='rgba(239, 68, 68, 0.4)', name='Negative Returns'))
+        fig_dist.add_trace(go.Scatter(x=grid[zero_idx:], y=den_eq[zero_idx:], fill='tozeroy', mode='none', fillcolor='rgba(16, 185, 129, 0.4)', name='Positive Returns'))
+        fig_dist.add_trace(go.Scatter(x=grid, y=den_eq, mode='lines', line=dict(color='#f1c40f', width=2), name='Equal-Weighted'))
+        fig_dist.add_vline(x=avg_e, line_width=1, line_dash="dash", line_color="#f1c40f", annotation_text=f"Average: {avg_e:+.2f}%", annotation_position="top left")
+        if not pd.isna(ag_e): fig_dist.add_vline(x=ag_e, line_width=1, line_dash="dash", line_color="green", annotation_text=f"Avg Gain: {ag_e:+.2f}%", annotation_position="bottom right")
+        if not pd.isna(ad_e): fig_dist.add_vline(x=ad_e, line_width=1, line_dash="dash", line_color="red", annotation_text=f"Avg Decline: {ad_e:+.2f}%", annotation_position="bottom left")
+        fig_dist.update_layout(title="Equal-Weighted vs. Cap-Weighted Return Distribution", xaxis_title="Individual Stock Daily Return (%)", yaxis_title="Density (Scaled)", plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white', legend=dict(x=0.01, y=0.99), height=600, yaxis_range=[0, 1.2])
+        st.plotly_chart(fig_dist, use_container_width=True)
         st.divider()
         st.header("S&P 500 Constituent Momentum")
         sp500_scatter_fig = create_sp500_scatter_plot(daily_data.xs('Close', level=1, axis=1), sp500_df, market_caps_info)
@@ -1073,6 +992,8 @@ def run_dashboard():
                 st.markdown(format_movers_table(bottom_performers, "Bottom 25 Performers", daily_data, current_price), unsafe_allow_html=True)
         else:
             st.warning("Top/Bottom performer data is unavailable.")
+    else:
+        st.warning("Could not generate return distribution and daily movers as intraday data is unavailable.")
 
 if __name__ == "__main__":
     run_dashboard()
