@@ -725,26 +725,6 @@ def run_dashboard():
                 st.plotly_chart(fig_adv_dec, use_container_width=True)
     st.divider()
 
-    # --- NEW: PCR Section ---
-    st.header("SPX Put/Call Ratio")
-    with st.spinner("Loading Put/Call Ratio data..."):
-        pcr_ticker, pcr_value, pcr_totals, pcr_expirations = get_pcr_data(n_expirations=20)
-    
-    if pcr_value is not None:
-        pcr_col1, pcr_col2 = st.columns([1, 2])
-        with pcr_col1:
-            st.metric("Put/Call Ratio", f"{pcr_value:.3f}")
-            st.metric("Total Put Volume", f"{pcr_totals['put_vol']:,.0f}")
-            st.metric("Total Call Volume", f"{pcr_totals['call_vol']:,.0f}")
-            st.caption(f"Calculated for **{pcr_ticker}** using the nearest **{len(pcr_expirations)}** expirations.")
-        with pcr_col2:
-            pcr_fig = create_pcr_gauge(pcr_value)
-            st.plotly_chart(pcr_fig, use_container_width=True)
-    else:
-        st.warning("Could not retrieve Put/Call Ratio data.")
-
-    st.divider()
-
     st.header("Seasonality Analysis")
     season_col1, season_col2 = st.columns(2)
     with season_col1:
@@ -886,6 +866,25 @@ def run_dashboard():
         st.plotly_chart(fig_vol, use_container_width=True)
     else:
         st.warning("Could not load all required data for the Volatility & Spreads chart. Please check your connection or the data sources.")
+
+    st.divider()
+        # --- NEW: PCR Section ---
+    st.header("SPX Put/Call Ratio")
+    with st.spinner("Loading Put/Call Ratio data..."):
+        pcr_ticker, pcr_value, pcr_totals, pcr_expirations = get_pcr_data(n_expirations=20)
+    
+    if pcr_value is not None:
+        pcr_col1, pcr_col2 = st.columns([1, 2])
+        with pcr_col1:
+            st.metric("Put/Call Ratio", f"{pcr_value:.3f}")
+            st.metric("Total Put Volume", f"{pcr_totals['put_vol']:,.0f}")
+            st.metric("Total Call Volume", f"{pcr_totals['call_vol']:,.0f}")
+            st.caption(f"Calculated for **{pcr_ticker}** using the nearest **{len(pcr_expirations)}** expirations.")
+        with pcr_col2:
+            pcr_fig = create_pcr_gauge(pcr_value)
+            st.plotly_chart(pcr_fig, use_container_width=True)
+    else:
+        st.warning("Could not retrieve Put/Call Ratio data.")
 
     st.divider()
     # --- END: Integrated code block from Vol.py ---
