@@ -756,7 +756,55 @@ def run_dashboard():
             st.plotly_chart(fig_vix_season, use_container_width=True)
     
     st.divider()
-
+    # --- NEW: TOP CONTRIBUTORS / DETRACTORS SECTION ---
+    st.subheader("Top Index Movers (by Contribution)")
+    valid_caps = {t: market_caps_info[t]['marketCap'] for t in market_caps_info if 'marketCap' in market_caps_info.get(t, {})}
+    mcap_df = pd.DataFrame.from_dict(valid_caps, orient='index', columns=['Market Cap'])
+    perf_df = pd.concat([(price_change / last_close * 100).rename('% Change'), mcap_df], axis=1).dropna()
+    
+    if not perf_df.empty:
+        total_market_cap = perf_df['Market Cap'].sum()
+        perf_df['Weight'] = perf_df['Market Cap'] / total_market_cap
+        perf_df['Contribution'] = perf_df['Weight'] * perf_df['% Change']
+        
+        top_contributors = perf_df.sort_values('Contribution', ascending=False).head(10)
+        top_detractors = perf_df.sort_values('Contribution', ascending=True).head(10)
+    
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = go.Figure(go.Bar(
+                x=top_contributors['Contribution'],
+                y=top_contributors.index,
+                orientation='h',
+                text=[f"{chg:.2f}%" for chg in top_contributors['% Change']],
+                textposition='outside',
+                marker_color='#10b981'
+            ))
+            fig.update_layout(
+                title="Top Contributors",
+                xaxis_title="Contribution to SPX Change (%)",
+                yaxis=dict(autorange="reversed"),
+                plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
+                margin=dict(l=20, r=20, t=40, b=20), height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            fig = go.Figure(go.Bar(
+                x=top_detractors['Contribution'],
+                y=top_detractors.index,
+                orientation='h',
+                text=[f"{chg:.2f}%" for chg in top_detractors['% Change']],
+                textposition='outside',
+                marker_color='#ef4444'
+            ))
+            fig.update_layout(
+                title="Top Detractors",
+                xaxis_title="Contribution to SPX Change (%)",
+                yaxis=dict(autorange="reversed"),
+                plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
+                 margin=dict(l=20, r=20, t=40, b=20), height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
     # --- START: Integrated code block from Vol.py ---
     st.header("Volatility & Credit Spreads")
 
@@ -868,25 +916,7 @@ def run_dashboard():
         st.warning("Could not load all required data for the Volatility & Spreads chart. Please check your connection or the data sources.")
 
     st.divider()
-        # --- NEW: PCR Section ---
-    st.header("SPX Put/Call Ratio")
-    with st.spinner("Loading Put/Call Ratio data..."):
-        pcr_ticker, pcr_value, pcr_totals, pcr_expirations = get_pcr_data(n_expirations=20)
-    
-    if pcr_value is not None:
-        pcr_col1, pcr_col2 = st.columns([1, 2])
-        with pcr_col1:
-            st.metric("Put/Call Ratio", f"{pcr_value:.3f}")
-            st.metric("Total Put Volume", f"{pcr_totals['put_vol']:,.0f}")
-            st.metric("Total Call Volume", f"{pcr_totals['call_vol']:,.0f}")
-            st.caption(f"Calculated for **{pcr_ticker}** using the nearest **{len(pcr_expirations)}** expirations.")
-        with pcr_col2:
-            pcr_fig = create_pcr_gauge(pcr_value)
-            st.plotly_chart(pcr_fig, use_container_width=True)
-    else:
-        st.warning("Could not retrieve Put/Call Ratio data.")
 
-    st.divider()
     # --- END: Integrated code block from Vol.py ---
     st.header("Sector Analysis")
     sec_fig_d, sec_fig_1m, sec_fig_ytd = create_relative_performance_charts(daily_data, intraday_data, SECTOR_ETF_MAP)
@@ -976,56 +1006,6 @@ def run_dashboard():
             up_dollar_str = f"{up_dollar_volume/1e9:.2f}B"; down_dollar_str = f"{down_dollar_volume/1e9:.2f}B"
             st.markdown(f"Up Vol (USD): <font color='green'>{up_dollar_str}</font> | Down Vol (USD): <font color='red'>{down_dollar_str}</font>", unsafe_allow_html=True)
             if (up_dollar_volume + down_dollar_volume) > 0: st.progress(up_dollar_volume / (up_dollar_volume + down_dollar_volume))
-
-        # --- NEW: TOP CONTRIBUTORS / DETRACTORS SECTION ---
-        st.subheader("Top Index Movers (by Contribution)")
-        valid_caps = {t: market_caps_info[t]['marketCap'] for t in market_caps_info if 'marketCap' in market_caps_info.get(t, {})}
-        mcap_df = pd.DataFrame.from_dict(valid_caps, orient='index', columns=['Market Cap'])
-        perf_df = pd.concat([(price_change / last_close * 100).rename('% Change'), mcap_df], axis=1).dropna()
-
-        if not perf_df.empty:
-            total_market_cap = perf_df['Market Cap'].sum()
-            perf_df['Weight'] = perf_df['Market Cap'] / total_market_cap
-            perf_df['Contribution'] = perf_df['Weight'] * perf_df['% Change']
-            
-            top_contributors = perf_df.sort_values('Contribution', ascending=False).head(10)
-            top_detractors = perf_df.sort_values('Contribution', ascending=True).head(10)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                fig = go.Figure(go.Bar(
-                    x=top_contributors['Contribution'],
-                    y=top_contributors.index,
-                    orientation='h',
-                    text=[f"{chg:.2f}%" for chg in top_contributors['% Change']],
-                    textposition='outside',
-                    marker_color='#10b981'
-                ))
-                fig.update_layout(
-                    title="Top Contributors",
-                    xaxis_title="Contribution to SPX Change (%)",
-                    yaxis=dict(autorange="reversed"),
-                    plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
-                    margin=dict(l=20, r=20, t=40, b=20), height=400
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                fig = go.Figure(go.Bar(
-                    x=top_detractors['Contribution'],
-                    y=top_detractors.index,
-                    orientation='h',
-                    text=[f"{chg:.2f}%" for chg in top_detractors['% Change']],
-                    textposition='outside',
-                    marker_color='#ef4444'
-                ))
-                fig.update_layout(
-                    title="Top Detractors",
-                    xaxis_title="Contribution to SPX Change (%)",
-                    yaxis=dict(autorange="reversed"),
-                    plot_bgcolor='#0E1117', paper_bgcolor='#0E1117', font_color='white',
-                     margin=dict(l=20, r=20, t=40, b=20), height=400
-                )
-                st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
 
